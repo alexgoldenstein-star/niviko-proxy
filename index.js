@@ -20,93 +20,108 @@ function getCordon(ciudad){if(!ciudad)return 3;return ZONA[String(ciudad).toLowe
 function hdr(t){return t?{'Authorization':'Bearer '+t}:{};}
 
 // ── MODALIDAD ─────────────────────────────────────────────────
-// Valores reales de logistic_type en la API de ML:
-// fulfillment / self_service_fulfillment → Full
-// me2                                    → Flex (SOLO CABA/GBA, repartidor propio)
-// cross_docking, xd_drop_off, me1, default → Correo estándar
-function getModal(order,ship){
-  const tags=order.tags||[];
-  const slt=ship?.logistic_type||'';
-  const slm=ship?.logistic?.mode||'';
-  const om=order.shipping?.mode||'';
-  const olt=order.shipping?.logistic_type||'';
+// Según documentación oficial de ML (developers.mercadolibre.com):
+//
+// El shipment devuelve: { "logistic": { "mode": "me2", "type": "xd_drop_off" } }
+// La clave es ship.logistic.TYPE (no mode):
+//
+// ship.logistic.type = 'self_service'  → FLEX (repartidor propio del vendedor)
+// ship.logistic_type = 'fulfillment'   → FULL (almacén ML)
+// ship.logistic.type = 'cross_docking' → CORREO (me2 con correo OCA/Andreani)
+// ship.logistic.type = 'xd_drop_off'  → CORREO (me2 drop-off en punto)
+// ship.logistic.type = 'drop_off'     → CORREO (me2 drop-off)
+// ship.logistic_type = 'default'      → CORREO (me1)
+function getModal(order, ship){
+  const tags = order.tags||[];
 
+  // Full: logistic_type del shipment = 'fulfillment'
+  const slt = ship?.logistic_type||'';
+  const olt = order.shipping?.logistic_type||'';
   if(slt==='fulfillment'||slt==='self_service_fulfillment'
     ||tags.includes('fulfillment')||olt==='fulfillment')
     return 'Full';
 
-  // Flex = SOLO me2. cross_docking/xd_drop_off = Correo
-  if(slm==='me2'||om==='me2'||olt==='me2')
-    return 'Flex';
+  // Flex: ship.logistic.type = 'self_service' (objeto logistic anidado en shipment)
+  // Este es el campo definitivo según la doc oficial de ML
+  const logType = ship?.logistic?.type||'';
+  if(logType==='self_service') return 'Flex';
 
+  // Correo: todo lo demás
+  // cross_docking, xd_drop_off, drop_off = me2 con correo (OCA/Andreani/etc.)
+  // default = me1 correo estándar
   return 'Correo';
 }
 
 // ── COSTO ENVÍO ───────────────────────────────────────────────
-function getEnvio(order,ship,fees,modal){
-  if(modal==='Full')return{costo:0,bonif:0,cordon:null};
-  const ciudad=ship?.receiver_address?.city?.name||order.shipping?.receiver_address?.city?.name||'';
+function getEnvio(order, ship, fees, modal){
+  if(modal==='Full') return {costo:0,bonif:0,cordon:null};
+  const ciudad = ship?.receiver_address?.city?.name
+    ||order.shipping?.receiver_address?.city?.name||'';
   if(modal==='Flex'){
-    const cordon=getCordon(ciudad);
-    const costoCordon=CORD[cordon]||CORD[3];
-    const cc=ship?.cost_components;
-    const bonif=cc?.buyer_shipping_cost>0?cc.buyer_shipping_cost:849;
-    return{costo:Math.max(0,costoCordon-bonif),bonif,cordon};
+    const cordon = getCordon(ciudad);
+    const costoCordon = CORD[cordon]||CORD[3];
+    const cc = ship?.cost_components;
+    const bonif = cc?.buyer_shipping_cost>0?cc.buyer_shipping_cost:849;
+    return {costo:Math.max(0,costoCordon-bonif),bonif,cordon};
   }
-  // Correo: buscar costo real
-  const fShip=(fees?.fee_detail||[]).find(f=>f.type==='shipping')?.value;
-  if(typeof fShip==='number'&&fShip<0)return{costo:Math.abs(fShip),bonif:0,cordon:null};
-  if(typeof ship?.cost==='number'&&ship.cost<0)return{costo:Math.abs(ship.cost),bonif:0,cordon:null};
-  const sc=ship?.cost_components?.seller_shipping_cost;
-  if(typeof sc==='number'&&sc!==0)return{costo:Math.abs(sc),bonif:0,cordon:null};
-  if((order.tags||[]).includes('no_shipping'))return{costo:0,bonif:0,cordon:null};
-  return{costo:0,bonif:0,cordon:null};
+  // Correo
+  const fShip = (fees?.fee_detail||[]).find(f=>f.type==='shipping')?.value;
+  if(typeof fShip==='number'&&fShip<0) return {costo:Math.abs(fShip),bonif:0,cordon:null};
+  if(typeof ship?.cost==='number'&&ship.cost<0) return {costo:Math.abs(ship.cost),bonif:0,cordon:null};
+  const sc = ship?.cost_components?.seller_shipping_cost;
+  if(typeof sc==='number'&&sc!==0) return {costo:Math.abs(sc),bonif:0,cordon:null};
+  if((order.tags||[]).includes('no_shipping')) return {costo:0,bonif:0,cordon:null};
+  return {costo:0,bonif:0,cordon:null};
 }
 
-function calcular(order,ship,fees){
-  const item=order.order_items?.[0]||{};
-  const venta=order.total_amount||0;
-  const sku=item.item?.seller_sku||item.item?.id||'';
-  const prod=findProd(sku);
+function calcular(order, ship, fees){
+  const item = order.order_items?.[0]||{};
+  const venta = order.total_amount||0;
+  const sku = item.item?.seller_sku||item.item?.id||'';
+  const prod = findProd(sku);
 
-  const comision=Math.abs(item.sale_fee||venta*0.14);
-
-  // Cuotas: solo contar diferencia si AMBOS campos son > 0
-  // Evita falsos positivos en órdenes de catálogo donde transaction_amount = 0
-  const cuotas=(order.payments||[]).reduce((s,p)=>{
+  const comision = Math.abs(item.sale_fee||venta*0.14);
+  // Cuotas: solo si ambos campos > 0 (evita falsos en catálogo donde transaction_amount=0)
+  const cuotas = (order.payments||[]).reduce((s,p)=>{
     const pagado=Math.abs(p.total_paid_amount||0);
     const base=Math.abs(p.transaction_amount||0);
     return (pagado>0&&base>0)?s+Math.max(0,pagado-base):s;
   },0);
+  const costo = prod?prod.ars:0;
+  const ivaPct = prod?prod.iva/100:0.21;
+  const iva = (venta/(1+ivaPct))*ivaPct;
+  const pub = (prod&&prod.pub===false)?0:venta*0.05;
+  const iibb = venta*0.04;
 
-  const costo=prod?prod.ars:0;
-  const ivaPct=prod?prod.iva/100:0.21;
-  const iva=(venta/(1+ivaPct))*ivaPct;
-  const pub=(prod&&prod.pub===false)?0:venta*0.05;
-  const iibb=venta*0.04;
-
-  const ciudad=ship?.receiver_address?.city?.name||order.shipping?.receiver_address?.city?.name||'';
-  const estado=ship?.receiver_address?.state?.name||'';
-  const modal=getModal(order,ship);
-  const {costo:costoEnvio,bonif:bonifEnvio,cordon}=getEnvio(order,ship,fees,modal);
-  const ganancia=venta-comision-cuotas-costo-iva-pub-iibb-costoEnvio;
+  const ciudad = ship?.receiver_address?.city?.name
+    ||order.shipping?.receiver_address?.city?.name||'';
+  const estado = ship?.receiver_address?.state?.name||'';
+  const modal = getModal(order,ship);
+  const {costo:costoEnvio,bonif:bonifEnvio,cordon} = getEnvio(order,ship,fees,modal);
+  const ganancia = venta-comision-cuotas-costo-iva-pub-iibb-costoEnvio;
 
   return {
-    id:order.id,fecha:(order.date_created||'').split('T')[0],
-    sku:sku||'—',desc:item.item?.title||'—',unidades:item.quantity||1,
-    ciudad,estado,modal,cordon,venta,
-    comision:Math.round(comision),cuotas:Math.round(cuotas),
-    costo:Math.round(costo),iva:Math.round(iva),ivaPct:prod?.iva||21,
-    pub:Math.round(pub),iibb:Math.round(iibb),
-    costoEnvio:Math.round(costoEnvio),bonifEnvio:Math.round(bonifEnvio||0),
-    ganancia:Math.round(ganancia),pct:venta>0?ganancia/venta:0,
+    id:order.id, fecha:(order.date_created||'').split('T')[0],
+    sku:sku||'—', desc:item.item?.title||'—', unidades:item.quantity||1,
+    ciudad, estado, modal, cordon, venta,
+    comision:Math.round(comision), cuotas:Math.round(cuotas),
+    costo:Math.round(costo), iva:Math.round(iva), ivaPct:prod?.iva||21,
+    pub:Math.round(pub), iibb:Math.round(iibb),
+    costoEnvio:Math.round(costoEnvio), bonifEnvio:Math.round(bonifEnvio||0),
+    ganancia:Math.round(ganancia), pct:venta>0?ganancia/venta:0,
     sinProducto:!prod,
     sinZona:modal==='Flex'&&!ZONA[String(ciudad).toLowerCase().trim()],
-    _dbg:{slm:ship?.logistic?.mode||'',slt:ship?.logistic_type||'',om:order.shipping?.mode||'',tags:order.tags||[]}
+    _dbg:{
+      logistic_type:ship?.logistic_type||'',
+      logistic_obj:ship?.logistic||null,
+      logistic_type_nested:ship?.logistic?.type||'',
+      order_mode:order.shipping?.mode||'',
+      tags:order.tags||[]
+    }
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'6.1',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'6.2',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -166,14 +181,16 @@ app.get('/debug/order/:id',async(req,res)=>{
     const modal=getModal(order,ship);
     const envio=getEnvio(order,ship,fees,modal);
     res.json({
-      id:order.id,sku:item.item?.seller_sku,titulo:item.item?.title,
-      total_amount:order.total_amount,sale_fee:item.sale_fee,
-      ORDER_STATUS:order.status,ORDER_TAGS:order.tags,
+      id:order.id, sku:item.item?.seller_sku, titulo:item.item?.title,
+      total_amount:order.total_amount, sale_fee:item.sale_fee,
+      ORDER_STATUS:order.status, ORDER_TAGS:order.tags,
       ORDER_SHIPPING_MODE:order.shipping?.mode,
       ORDER_FREE_SHIPPING:order.shipping?.free_shipping,
-      SHIP_LOGISTIC_OBJECT:ship?.logistic,
-      SHIP_LOGISTIC_MODE:ship?.logistic?.mode,
-      SHIP_LOGISTIC_TYPE:ship?.logistic_type,
+      // Campos clave para detectar modalidad
+      SHIP_LOGISTIC_OBJECT:ship?.logistic,           // { mode, type } - clave!
+      SHIP_LOGISTIC_TYPE_NESTED:ship?.logistic?.type, // 'self_service'=Flex
+      SHIP_LOGISTIC_TYPE:ship?.logistic_type,         // 'fulfillment'=Full
+      // Costos
       SHIP_COST:ship?.cost,
       SHIP_COST_COMPONENTS:ship?.cost_components,
       FEE_DETAIL:fees?.fee_detail,
@@ -258,5 +275,5 @@ app.get('/products',(req,res)=>res.json({products:PRODS,total:PRODS.length}));
 app.get('/zones',(req,res)=>res.json({zones:ZONA,total:Object.keys(ZONA).length}));
 
 const PORT=process.env.PORT||3000;
-app.listen(PORT,()=>console.log('NIVIKO Proxy v6.1 - Puerto '+PORT));
+app.listen(PORT,()=>console.log('NIVIKO Proxy v6.2 - Puerto '+PORT));
 module.exports=app;
