@@ -20,35 +20,29 @@ function getCordon(ciudad){if(!ciudad)return 3;return ZONA[String(ciudad).toLowe
 function hdr(t){return t?{'Authorization':'Bearer '+t}:{};}
 
 // ── MODALIDAD ─────────────────────────────────────────────────
-// Según documentación oficial de ML (developers.mercadolibre.com):
-//
-// El shipment devuelve: { "logistic": { "mode": "me2", "type": "xd_drop_off" } }
-// La clave es ship.logistic.TYPE (no mode):
-//
-// ship.logistic.type = 'self_service'  → FLEX (repartidor propio del vendedor)
-// ship.logistic_type = 'fulfillment'   → FULL (almacén ML)
-// ship.logistic.type = 'cross_docking' → CORREO (me2 con correo OCA/Andreani)
-// ship.logistic.type = 'xd_drop_off'  → CORREO (me2 drop-off en punto)
-// ship.logistic.type = 'drop_off'     → CORREO (me2 drop-off)
-// ship.logistic_type = 'default'      → CORREO (me1)
+// Confirmado con raw real de la API:
+// ship.logistic_type = 'self_service'              → FLEX
+// ship.logistic_type = 'fulfillment' |             → FULL
+//   'self_service_fulfillment'
+// ship.logistic_type = 'cross_docking' |           → CORREO
+//   'xd_drop_off' | 'drop_off' | 'default'
+// NOTA: ship.logistic (objeto anidado) puede ser null
+//       el campo real es ship.logistic_type (top-level)
 function getModal(order, ship){
   const tags = order.tags||[];
-
-  // Full: logistic_type del shipment = 'fulfillment'
   const slt = ship?.logistic_type||'';
   const olt = order.shipping?.logistic_type||'';
+
+  // Full
   if(slt==='fulfillment'||slt==='self_service_fulfillment'
     ||tags.includes('fulfillment')||olt==='fulfillment')
     return 'Full';
 
-  // Flex: ship.logistic.type = 'self_service' (objeto logistic anidado en shipment)
-  // Este es el campo definitivo según la doc oficial de ML
-  const logType = ship?.logistic?.type||'';
-  if(logType==='self_service') return 'Flex';
+  // Flex: logistic_type = 'self_service' (confirmado con raw real)
+  if(slt==='self_service'||olt==='self_service')
+    return 'Flex';
 
-  // Correo: todo lo demás
-  // cross_docking, xd_drop_off, drop_off = me2 con correo (OCA/Andreani/etc.)
-  // default = me1 correo estándar
+  // Correo: cross_docking, xd_drop_off, drop_off, default
   return 'Correo';
 }
 
@@ -60,8 +54,8 @@ function getEnvio(order, ship, fees, modal){
   if(modal==='Flex'){
     const cordon = getCordon(ciudad);
     const costoCordon = CORD[cordon]||CORD[3];
-    const cc = ship?.cost_components;
-    const bonif = cc?.buyer_shipping_cost>0?cc.buyer_shipping_cost:849;
+    // Bonificación ML para Flex: $849 estándar
+    const bonif = 849;
     return {costo:Math.max(0,costoCordon-bonif),bonif,cordon};
   }
   // Correo
@@ -79,14 +73,25 @@ function calcular(order, ship, fees){
   const venta = order.total_amount||0;
   const sku = item.item?.seller_sku||item.item?.id||'';
   const prod = findProd(sku);
+  const tags = order.tags||[];
 
   const comision = Math.abs(item.sale_fee||venta*0.14);
-  // Cuotas: solo si ambos campos > 0 (evita falsos en catálogo donde transaction_amount=0)
-  const cuotas = (order.payments||[]).reduce((s,p)=>{
-    const pagado=Math.abs(p.total_paid_amount||0);
-    const base=Math.abs(p.transaction_amount||0);
-    return (pagado>0&&base>0)?s+Math.max(0,pagado-base):s;
-  },0);
+
+  // ── CUOTAS ───────────────────────────────────────────────────
+  // Problema real: en órdenes de catálogo, payment.total_paid_amount
+  // puede diferir de payment.transaction_amount por descuentos que ML
+  // le da al comprador, NO por cuotas reales.
+  // Solo contamos cuotas si la orden tiene tag 'financing_fee',
+  // que es el tag que ML usa cuando HAY costo real de financiación.
+  const hasFinancing = tags.includes('financing_fee');
+  const cuotas = hasFinancing
+    ? (order.payments||[]).reduce((s,p)=>{
+        const pagado=Math.abs(p.total_paid_amount||0);
+        const base=Math.abs(p.transaction_amount||0);
+        return (pagado>0&&base>0)?s+Math.max(0,pagado-base):s;
+      },0)
+    : 0;
+
   const costo = prod?prod.ars:0;
   const ivaPct = prod?prod.iva/100:0.21;
   const iva = (venta/(1+ivaPct))*ivaPct;
@@ -114,14 +119,13 @@ function calcular(order, ship, fees){
     _dbg:{
       logistic_type:ship?.logistic_type||'',
       logistic_obj:ship?.logistic||null,
-      logistic_type_nested:ship?.logistic?.type||'',
-      order_mode:order.shipping?.mode||'',
-      tags:order.tags||[]
+      tags,
+      hasFinancing
     }
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'6.2',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'6.3',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -186,15 +190,18 @@ app.get('/debug/order/:id',async(req,res)=>{
       ORDER_STATUS:order.status, ORDER_TAGS:order.tags,
       ORDER_SHIPPING_MODE:order.shipping?.mode,
       ORDER_FREE_SHIPPING:order.shipping?.free_shipping,
-      // Campos clave para detectar modalidad
-      SHIP_LOGISTIC_OBJECT:ship?.logistic,           // { mode, type } - clave!
-      SHIP_LOGISTIC_TYPE_NESTED:ship?.logistic?.type, // 'self_service'=Flex
-      SHIP_LOGISTIC_TYPE:ship?.logistic_type,         // 'fulfillment'=Full
-      // Costos
+      SHIP_LOGISTIC_TYPE:ship?.logistic_type,
+      SHIP_LOGISTIC_OBJECT:ship?.logistic,
       SHIP_COST:ship?.cost,
       SHIP_COST_COMPONENTS:ship?.cost_components,
       FEE_DETAIL:fees?.fee_detail,
       FEE_SHIPPING:fees?.fee_detail?.find?.(f=>f.type==='shipping')?.value,
+      PAYMENTS:order.payments?.map(p=>({
+        total_paid:p.total_paid_amount,
+        transaction:p.transaction_amount,
+        cuotas:p.installments,
+        status:p.status
+      })),
       CIUDAD:ship?.receiver_address?.city?.name,
       MODAL_DETECTADA:modal,
       ENVIO:envio,
@@ -275,5 +282,5 @@ app.get('/products',(req,res)=>res.json({products:PRODS,total:PRODS.length}));
 app.get('/zones',(req,res)=>res.json({zones:ZONA,total:Object.keys(ZONA).length}));
 
 const PORT=process.env.PORT||3000;
-app.listen(PORT,()=>console.log('NIVIKO Proxy v6.2 - Puerto '+PORT));
+app.listen(PORT,()=>console.log('NIVIKO Proxy v6.3 - Puerto '+PORT));
 module.exports=app;
