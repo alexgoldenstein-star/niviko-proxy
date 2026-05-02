@@ -75,7 +75,12 @@ function calcular(order, ship, fees){
   const prod = findProd(sku);
   const tags = order.tags||[];
 
-  const comision = Math.abs(item.sale_fee||venta*0.14);
+  // Comisión: usar fees.fee_detail[mercadolibre] como fuente primaria
+  // Para pack_order, item.sale_fee puede ser incorrecto (fee de 1 unidad, no de toda la orden)
+  const feeML = (fees?.fee_detail||[]).find(f=>f.type==='mercadolibre'||f.type==='listing')?.value;
+  const comision = feeML && feeML < 0
+    ? Math.abs(feeML)                          // fees.fee_detail → más preciso
+    : Math.abs(item.sale_fee||venta*0.14);     // fallback: sale_fee del item
 
   // ── CUOTAS ───────────────────────────────────────────────────
   // Problema real: en órdenes de catálogo, payment.total_paid_amount
@@ -125,7 +130,7 @@ function calcular(order, ship, fees){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'6.4',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'6.5',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
