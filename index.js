@@ -130,7 +130,7 @@ function calcular(order, ship, fees){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'6.5',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'6.6',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -156,10 +156,19 @@ app.get('/orders/all',async(req,res)=>{
       const r=await fetch(ML+'/orders/search?'+p,{headers:hdr(token)});
       const data=await r.json();
       if(data.error||!data.results)break;
-      all=all.concat(data.results);
+      // Filtrar en cliente también por si acaso: solo órdenes realmente pagadas
+      const valid=data.results.filter(o=>{
+        const s=o.status||'';
+        const tags=o.tags||[];
+        // Excluir canceladas, reembolsadas, inválidas
+        if(s==='cancelled'||s==='invalid')return false;
+        if(tags.includes('cancelled')||tags.includes('refunded'))return false;
+        return true;
+      });
+      all=all.concat(valid);
       total=data.paging?.total||0;
-      offset+=data.results.length;
-      if(all.length>=total)break;
+      offset+=data.results.length; // usar results.length para paginar correctamente
+      if(all.length>=total||!data.results.length)break;
     }
     const processed=[];
     for(let i=0;i<all.length;i+=5){
