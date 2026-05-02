@@ -99,7 +99,8 @@ function calcular(order, ship, fees){
 
   const costo = prod ? prod.ars*(item.quantity||1) : 0; // multiplicar por unidades
   const ivaPct = prod?prod.iva/100:0.21;
-  const iva = (venta/(1+ivaPct))*ivaPct;
+  // IVA = % directo sobre el precio de venta (de arriba para abajo)
+  const iva = venta*ivaPct;
   const pub = (prod&&prod.pub===false)?0:venta*0.05;
   const iibb = venta*0.04;
 
@@ -130,7 +131,7 @@ function calcular(order, ship, fees){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'6.6',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'6.7',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
