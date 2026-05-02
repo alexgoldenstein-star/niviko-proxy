@@ -165,7 +165,7 @@ function calcular(order, ship, fees, useBonifCost=false){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'7.5',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'7.6',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -309,36 +309,42 @@ app.post('/reconcile',async(req,res)=>{
 });
 
 app.get('/mercado/search',async(req,res)=>{
-  // Endpoint PUBLICO de ML - nunca enviar token (genera UNAUTHORIZED)
+  // ML bloquea IPs de servidores para búsqueda pública sin auth
+  // Solución: usar access_token como query param (no como Bearer header)
+  const token=req.headers['x-ml-token']||'';
   try{
     const{q,category,sort='sold_quantity_desc',limit=50}=req.query;
-    // Headers mínimos necesarios
     const h={'Accept':'application/json','Accept-Language':'es-AR,es;q=0.9'};
 
-    const urls=[];
-    let base=`${ML}/sites/MLA/search?limit=${limit}`;
-    if(q) base+=`&q=${encodeURIComponent(q)}`;
-    if(category) base+=`&category=${category}`;
-    urls.push(base+'&sort=sold_quantity_desc');
-    urls.push(base+'&sort=relevance');
+    // Construir URL con access_token como query param
+    const mkUrl=(sortVal)=>{
+      let u=`${ML}/sites/MLA/search?limit=${limit}&sort=${sortVal}`;
+      if(q) u+=`&q=${encodeURIComponent(q)}`;
+      if(category) u+=`&category=${category}`;
+      if(token) u+=`&access_token=${encodeURIComponent(token)}`;
+      return u;
+    };
 
-    const results=await Promise.all(urls.map(u=>fetch(u,{headers:h}).then(r=>r.ok?r.json():{}).catch(()=>({}))));
-    const r1=results[0],r2=results[1];
+    const[d1,d2]=await Promise.all([
+      fetch(mkUrl('sold_quantity_desc'),{headers:h}).then(r=>r.json()).catch(()=>({})),
+      fetch(mkUrl('relevance'),{headers:h}).then(r=>r.json()).catch(()=>({}))
+    ]);
 
-    // Si ninguno da resultados y hay categoría, reintentar sin ella
-    if((!r1.results?.length&&!r2.results?.length)&&category&&q){
-      const u3=`${ML}/sites/MLA/search?limit=${limit}&sort=sold_quantity_desc&q=${encodeURIComponent(q)}`;
-      const r3=await fetch(u3,{headers:h}).then(r=>r.ok?r.json():{}).catch(()=>({}));
-      if(r3.results?.length) return res.json(r3);
+    // Retry sin categoría si no hay resultados
+    if((!d1.results?.length&&!d2.results?.length)&&category&&q){
+      let u3=`${ML}/sites/MLA/search?limit=${limit}&sort=sold_quantity_desc&q=${encodeURIComponent(q)}`;
+      if(token) u3+=`&access_token=${encodeURIComponent(token)}`;
+      const d3=await fetch(u3,{headers:h}).then(r=>r.json()).catch(()=>({}));
+      if(d3.results?.length) return res.json(d3);
     }
 
     // Combinar y deduplicar
     const seen=new Set();
     const combined=[];
-    for(const item of [...(r1.results||[]),...(r2.results||[])]){
+    for(const item of [...(d1.results||[]),...(d2.results||[])]){
       if(!seen.has(item.id)){seen.add(item.id);combined.push(item);}
     }
-    res.json({...r1,results:combined,paging:{total:combined.length}});
+    res.json({...d1,results:combined,paging:{total:combined.length}});
   }catch(e){res.status(500).json({error:e.message});}
 });
 
