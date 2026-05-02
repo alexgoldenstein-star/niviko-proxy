@@ -165,7 +165,7 @@ function calcular(order, ship, fees, useBonifCost=false){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'7.4',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'7.5',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -309,53 +309,40 @@ app.post('/reconcile',async(req,res)=>{
 });
 
 app.get('/mercado/search',async(req,res)=>{
-  // /sites/MLA/search es un endpoint PUBLICO de ML - no requiere token
-  // El token se usa opcionalmente para aumentar el rate limit
+  // Endpoint PUBLICO de ML - nunca enviar token (genera UNAUTHORIZED)
   try{
-    const{q,category,sort='relevance',limit=50}=req.query;
-    const token=req.headers['x-ml-token']; // opcional
+    const{q,category,sort='sold_quantity_desc',limit=50}=req.query;
+    // Headers mínimos necesarios
+    const h={'Accept':'application/json','Accept-Language':'es-AR,es;q=0.9'};
 
-    // Dos búsquedas en paralelo: relevance + sold_quantity_desc
-    let url1=`${ML}/sites/MLA/search?limit=${limit}&sort=relevance`;
-    let url2=`${ML}/sites/MLA/search?limit=${limit}&sort=sold_quantity_desc`;
-    if(q){url1+=`&q=${encodeURIComponent(q)}`;url2+=`&q=${encodeURIComponent(q)}`;}
-    if(category){url1+=`&category=${category}`;url2+=`&category=${category}`;}
+    const urls=[];
+    let base=`${ML}/sites/MLA/search?limit=${limit}`;
+    if(q) base+=`&q=${encodeURIComponent(q)}`;
+    if(category) base+=`&category=${category}`;
+    urls.push(base+'&sort=sold_quantity_desc');
+    urls.push(base+'&sort=relevance');
 
-    // Headers que simulan browser para evitar bloqueo de ML
-    const browserHeaders={
-      'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept':'application/json, text/plain, */*',
-      'Accept-Language':'es-AR,es;q=0.9',
-      'Referer':'https://www.mercadolibre.com.ar/',
-      'Origin':'https://www.mercadolibre.com.ar'
-    };
-    // Agregar token si está disponible (mejora rate limit)
-    if(token) browserHeaders['Authorization']=`Bearer ${token}`;
+    const results=await Promise.all(urls.map(u=>fetch(u,{headers:h}).then(r=>r.ok?r.json():{}).catch(()=>({}))));
+    const r1=results[0],r2=results[1];
 
-    const[d1,d2]=await Promise.all([
-      fetch(url1,{headers:browserHeaders}).then(r=>r.json()).catch(()=>({})),
-      fetch(url2,{headers:browserHeaders}).then(r=>r.json()).catch(()=>({}))
-    ]);
+    // Si ninguno da resultados y hay categoría, reintentar sin ella
+    if((!r1.results?.length&&!r2.results?.length)&&category&&q){
+      const u3=`${ML}/sites/MLA/search?limit=${limit}&sort=sold_quantity_desc&q=${encodeURIComponent(q)}`;
+      const r3=await fetch(u3,{headers:h}).then(r=>r.ok?r.json():{}).catch(()=>({}));
+      if(r3.results?.length) return res.json(r3);
+    }
 
-    let r1=d1,r2=d2;
-
-    // Combinar y deduplicar, sold_quantity_desc primero
+    // Combinar y deduplicar
     const seen=new Set();
     const combined=[];
-    for(const item of [...(r2.results||[]),...(r1.results||[])]){
+    for(const item of [...(r1.results||[]),...(r2.results||[])]){
       if(!seen.has(item.id)){seen.add(item.id);combined.push(item);}
     }
-
-    if(combined.length===0&&category){
-      // Reintentar sin categoría
-      const url3=`${ML}/sites/MLA/search?limit=${limit}&sort=sold_quantity_desc&q=${encodeURIComponent(q||'')}`;
-      const d3=await fetch(url3).then(r=>r.json()).catch(()=>({}));
-      return res.json(d3);
-    }
-
     res.json({...r1,results:combined,paging:{total:combined.length}});
   }catch(e){res.status(500).json({error:e.message});}
 });
+
+
 app.get('/mercado/seller',async(req,res)=>{
   const token=req.headers['x-ml-token']; // opcional para datos públicos
   const{q}=req.query;if(!/^\d+$/.test(q))return res.json({error:'User ID numérico',seller:{},items:[]});
