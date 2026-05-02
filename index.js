@@ -165,7 +165,7 @@ function calcular(order, ship, fees, useBonifCost=false){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'7.2',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'7.3',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -309,59 +309,70 @@ app.post('/reconcile',async(req,res)=>{
 });
 
 app.get('/mercado/search',async(req,res)=>{
-  const token=req.headers['x-ml-token'];if(!token)return res.status(401).json({error:'Token requerido'});
+  // /sites/MLA/search es un endpoint PUBLICO de ML - no requiere token
+  // El token se usa opcionalmente para aumentar el rate limit
   try{
     const{q,category,sort='relevance',limit=50}=req.query;
-    // Hacer dos búsquedas en paralelo: una por relevance y otra por sold_quantity
-    // para tener tanto los más relevantes como los más vendidos
-    let url=`${ML}/sites/MLA/search?limit=${limit}&sort=${sort}`;
-    if(q) url+=`&q=${encodeURIComponent(q)}`;
-    if(category) url+=`&category=${category}`;
-    
-    // También buscar por sold_quantity_desc para obtener los más vendidos
-    let urlTop=`${ML}/sites/MLA/search?limit=${limit}&sort=sold_quantity_desc`;
-    if(q) urlTop+=`&q=${encodeURIComponent(q)}`;
-    if(category) urlTop+=`&category=${category}`;
-    
-    const[r1,r2]=await Promise.all([
-      fetch(url,{headers:hdr(token)}).then(r=>r.json()).catch(()=>({})),
-      fetch(urlTop,{headers:hdr(token)}).then(r=>r.json()).catch(()=>({}))
+    const token=req.headers['x-ml-token']; // opcional
+
+    // Dos búsquedas en paralelo: relevance + sold_quantity_desc
+    let url1=`${ML}/sites/MLA/search?limit=${limit}&sort=relevance`;
+    let url2=`${ML}/sites/MLA/search?limit=${limit}&sort=sold_quantity_desc`;
+    if(q){url1+=`&q=${encodeURIComponent(q)}`;url2+=`&q=${encodeURIComponent(q)}`;}
+    if(category){url1+=`&category=${category}`;url2+=`&category=${category}`;}
+
+    // Sin token para búsqueda pública - evita el error UNAUTHORIZED
+    const headers={};
+    // Si hay token válido, usarlo - si no, búsqueda pública sin auth
+    if(token) headers['Authorization']=`Bearer ${token}`;
+
+    const[d1,d2]=await Promise.all([
+      fetch(url1,{headers}).then(r=>r.json()).catch(()=>({})),
+      fetch(url2,{headers}).then(r=>r.json()).catch(()=>({}))
     ]);
-    
-    // Combinar y deduplicar resultados, priorizando los de sold_quantity_desc
+
+    // Si da UNAUTHORIZED, reintentar sin token
+    const d1ok=(d1.results||[]).length>0;
+    const d2ok=(d2.results||[]).length>0;
+    let r1=d1,r2=d2;
+    if(!d1ok&&!d2ok&&token){
+      const[rd1,rd2]=await Promise.all([
+        fetch(url1).then(r=>r.json()).catch(()=>({})),
+        fetch(url2).then(r=>r.json()).catch(()=>({}))
+      ]);
+      r1=rd1;r2=rd2;
+    }
+
+    // Combinar y deduplicar, sold_quantity_desc primero
     const seen=new Set();
     const combined=[];
     for(const item of [...(r2.results||[]),...(r1.results||[])]){
-      if(!seen.has(item.id)){
-        seen.add(item.id);
-        combined.push(item);
-      }
+      if(!seen.has(item.id)){seen.add(item.id);combined.push(item);}
     }
-    
-    // Si no hay resultados con categoría, reintentar sin ella
-    if(category&&combined.length===0){
-      let url3=`${ML}/sites/MLA/search?limit=${limit}&sort=sold_quantity_desc&q=${encodeURIComponent(q||'')}`;
-      const r3=await fetch(url3,{headers:hdr(token)});
-      const d3=await r3.json();
+
+    if(combined.length===0&&category){
+      // Reintentar sin categoría
+      const url3=`${ML}/sites/MLA/search?limit=${limit}&sort=sold_quantity_desc&q=${encodeURIComponent(q||'')}`;
+      const d3=await fetch(url3).then(r=>r.json()).catch(()=>({}));
       return res.json(d3);
     }
-    
-    res.json({...r1,results:combined,paging:{...r1.paging,total:combined.length}});
+
+    res.json({...r1,results:combined,paging:{total:combined.length}});
   }catch(e){res.status(500).json({error:e.message});}
 });
 app.get('/mercado/seller',async(req,res)=>{
-  const token=req.headers['x-ml-token'];if(!token)return res.status(401).json({error:'Token requerido'});
+  const token=req.headers['x-ml-token']; // opcional para datos públicos
   const{q}=req.query;if(!/^\d+$/.test(q))return res.json({error:'User ID numérico',seller:{},items:[]});
   try{const[sR,iR]=await Promise.all([fetch(ML+'/users/'+q,{headers:hdr(token)}),fetch(ML+'/sites/MLA/search?seller_id='+q+'&limit=50&sort=sold_quantity_desc',{headers:hdr(token)})]);res.json({seller:await sR.json(),items:(await iR.json()).results||[]});}
   catch(e){res.status(500).json({error:e.message});}
 });
 app.get('/mercado/item',async(req,res)=>{
-  const token=req.headers['x-ml-token'];if(!token)return res.status(401).json({error:'Token requerido'});
+  const token=req.headers['x-ml-token']; // opcional
   try{res.json(await fetch(ML+'/items/'+req.query.id,{headers:hdr(token)}).then(r=>r.json()));}
   catch(e){res.status(500).json({error:e.message});}
 });
 app.get('/mercado/ean',async(req,res)=>{
-  const token=req.headers['x-ml-token'];if(!token)return res.status(401).json({error:'Token requerido'});
+  const token=req.headers['x-ml-token']; // opcional
   try{res.json(await fetch(ML+'/sites/MLA/search?q='+encodeURIComponent(req.query.code)+'&limit=20',{headers:hdr(token)}).then(r=>r.json()));}
   catch(e){res.status(500).json({error:e.message});}
 });
