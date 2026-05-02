@@ -165,7 +165,7 @@ function calcular(order, ship, fees, useBonifCost=false){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'7.6',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'7.7',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -372,6 +372,75 @@ app.get('/mercado/ean',async(req,res)=>{
 
 app.get('/products',(req,res)=>res.json({products:PRODS,total:PRODS.length}));
 app.get('/zones',(req,res)=>res.json({zones:ZONA,total:Object.keys(ZONA).length}));
+
+// ── CLAUDE AI PARA ANÁLISIS DE MERCADO ───────────────────────
+// El browser no puede llamar a api.anthropic.com directamente (CORS)
+// El proxy actúa de intermediario
+app.post('/ai/market',async(req,res)=>{
+  try{
+    const{query,category}=req.body;
+    if(!query)return res.status(400).json({error:'query requerido'});
+
+    const prompt=`Analizá el mercado de "${query}" en MercadoLibre Argentina.
+Buscá en mercadolibre.com.ar los productos más vendidos de esta categoría.
+
+Respondé SOLO con un JSON válido, sin texto adicional, sin markdown:
+{
+  "precio_min": number,
+  "precio_max": number,
+  "precio_promedio": number,
+  "precio_mediana": number,
+  "total_publicaciones": number,
+  "top_productos": [
+    {"titulo": "string", "precio": number, "vendidos": number, "vendedor": "string"},
+    {"titulo": "string", "precio": number, "vendidos": number, "vendedor": "string"},
+    {"titulo": "string", "precio": number, "vendidos": number, "vendedor": "string"},
+    {"titulo": "string", "precio": number, "vendidos": number, "vendedor": "string"},
+    {"titulo": "string", "precio": number, "vendidos": number, "vendedor": "string"}
+  ],
+  "top_vendedores": [
+    {"nombre": "string", "publicaciones": number, "ventas_estimadas": number},
+    {"nombre": "string", "publicaciones": number, "ventas_estimadas": number},
+    {"nombre": "string", "publicaciones": number, "ventas_estimadas": number}
+  ],
+  "insights": ["string", "string", "string"],
+  "recomendacion_precio": number,
+  "tendencia": "creciente|estable|decreciente",
+  "nivel_competencia": "bajo|medio|alto",
+  "ventas_diarias_estimadas": number
+}`;
+
+    const r=await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'anthropic-version':'2023-06-01',
+        'anthropic-beta':'web-search-2025-03-05'
+      },
+      body:JSON.stringify({
+        model:'claude-sonnet-4-20250514',
+        max_tokens:2000,
+        tools:[{type:'web_search_20250305',name:'web_search'}],
+        messages:[{role:'user',content:prompt}]
+      })
+    });
+
+    const data=await r.json();
+    if(!r.ok)return res.status(r.status).json({error:data.error?.message||'Error de Claude API'});
+
+    // Extraer texto de la respuesta
+    const textBlock=data.content?.find(b=>b.type==='text');
+    if(!textBlock?.text)return res.status(500).json({error:'Sin respuesta de IA'});
+
+    // Parsear JSON
+    const jsonMatch=textBlock.text.match(/\{[\s\S]*\}/);
+    if(!jsonMatch)return res.status(500).json({error:'No se pudo parsear JSON',raw:textBlock.text.substring(0,200)});
+
+    const marketData=JSON.parse(jsonMatch[0]);
+    res.json({ok:true,data:marketData});
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
 
 const PORT=process.env.PORT||3000;
 app.listen(PORT,()=>console.log('NIVIKO Proxy v6.3 - Puerto '+PORT));
