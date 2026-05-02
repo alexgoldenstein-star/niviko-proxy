@@ -58,12 +58,27 @@ function getEnvio(order, ship, fees, modal){
     const bonif = 849;
     return {costo:Math.max(0,costoCordon-bonif),bonif,cordon};
   }
-  // Correo
+  // Correo: buscar costo en orden de disponibilidad
+  // 1. fees.fee_detail[shipping] — post-liquidación (más preciso)
   const fShip = (fees?.fee_detail||[]).find(f=>f.type==='shipping')?.value;
   if(typeof fShip==='number'&&fShip<0) return {costo:Math.abs(fShip),bonif:0,cordon:null};
+
+  // 2. ship.cost — negativo post-entrega
   if(typeof ship?.cost==='number'&&ship.cost<0) return {costo:Math.abs(ship.cost),bonif:0,cordon:null};
+
+  // 3. cost_components.seller_shipping_cost
   const sc = ship?.cost_components?.seller_shipping_cost;
   if(typeof sc==='number'&&sc!==0) return {costo:Math.abs(sc),bonif:0,cordon:null};
+
+  // 4. ship.lead_time.cost — disponible ANTES de la entrega (not_delivered)
+  //    Este es el costo real que ML va a cobrar, igual al que muestra en el portal
+  const ltCost = ship?.lead_time?.cost;
+  if(typeof ltCost==='number'&&ltCost>0) return {costo:ltCost,bonif:0,cordon:null};
+
+  // 5. ship.shipping_option.cost — precio de la opción de envío
+  const soCost = ship?.shipping_option?.cost;
+  if(typeof soCost==='number'&&soCost>0) return {costo:soCost,bonif:0,cordon:null};
+
   if((order.tags||[]).includes('no_shipping')) return {costo:0,bonif:0,cordon:null};
   return {costo:0,bonif:0,cordon:null};
 }
@@ -131,7 +146,7 @@ function calcular(order, ship, fees){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'6.7',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'6.8',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -209,6 +224,8 @@ app.get('/debug/order/:id',async(req,res)=>{
       SHIP_LOGISTIC_OBJECT:ship?.logistic,
       SHIP_COST:ship?.cost,
       SHIP_COST_COMPONENTS:ship?.cost_components,
+      SHIP_LEAD_TIME:ship?.lead_time,
+      SHIP_SHIPPING_OPTION:ship?.shipping_option,
       FEE_DETAIL:fees?.fee_detail,
       FEE_SHIPPING:fees?.fee_detail?.find?.(f=>f.type==='shipping')?.value,
       PAYMENTS:order.payments?.map(p=>({
