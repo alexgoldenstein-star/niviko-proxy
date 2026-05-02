@@ -47,7 +47,7 @@ function getModal(order, ship){
 }
 
 // ── COSTO ENVÍO ───────────────────────────────────────────────
-function getEnvio(order, ship, fees, modal){
+function getEnvio(order, ship, fees, modal, useBonifCost=false){
   if(modal==='Full') return {costo:0,bonif:0,cordon:null};
   const ciudad = ship?.receiver_address?.city?.name
     ||order.shipping?.receiver_address?.city?.name||'';
@@ -88,10 +88,21 @@ function getEnvio(order, ship, fees, modal){
   if(buyerPaid > order.total_amount * 1.05) return {costo:0,bonif:0,cordon:null};
   
   if((order.tags||[]).includes('no_shipping')) return {costo:0,bonif:0,cordon:null};
+
+  // useBonifCost=true: aunque ML bonifique el envío, el usuario quiere verlo como gasto
+  // Usamos list_cost (costo bruto antes de la bonificación) como costo real
+  if(useBonifCost){
+    const listCost = ship?.shipping_option?.list_cost || ship?.lead_time?.list_cost;
+    if(typeof listCost==='number' && listCost>0) return {costo:listCost,bonif:0,cordon:null};
+    // Si no hay list_cost pero hay shipping_option.cost, usarlo igual
+    const soCostRaw = ship?.shipping_option?.cost;
+    if(typeof soCostRaw==='number' && soCostRaw>0) return {costo:soCostRaw,bonif:0,cordon:null};
+  }
+
   return {costo:0,bonif:0,cordon:null};
 }
 
-function calcular(order, ship, fees){
+function calcular(order, ship, fees, useBonifCost=false){
   const item = order.order_items?.[0]||{};
   const venta = order.total_amount||0;
   const sku = item.item?.seller_sku||item.item?.id||'';
@@ -131,7 +142,7 @@ function calcular(order, ship, fees){
     ||order.shipping?.receiver_address?.city?.name||'';
   const estado = ship?.receiver_address?.state?.name||'';
   const modal = getModal(order,ship);
-  const {costo:costoEnvio,bonif:bonifEnvio,cordon} = getEnvio(order,ship,fees,modal);
+  const {costo:costoEnvio,bonif:bonifEnvio,cordon} = getEnvio(order,ship,fees,modal,useBonifCost);
   const ganancia = venta-comision-cuotas-costo-iva-pub-iibb-costoEnvio;
 
   return {
@@ -154,7 +165,7 @@ function calcular(order, ship, fees){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'6.9',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'7.0',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -172,7 +183,8 @@ app.get('/me',async(req,res)=>{
 app.get('/orders/all',async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token)return res.status(401).json({error:'Token requerido'});
-  const{seller_id,from,to}=req.query;
+  const{seller_id,from,to,envio_bonif}=req.query;
+  const useBonifCost = envio_bonif==='true'; // si true, cobrar envío aunque ML lo bonifique
   try{
     let all=[],offset=0,total=null;
     while(total===null||offset<total){
@@ -202,7 +214,7 @@ app.get('/orders/all',async(req,res)=>{
           o.shipping?.id?fetch(ML+'/shipments/'+o.shipping.id,{headers:hdr(token)}).then(r=>r.ok?r.json():null).catch(()=>null):Promise.resolve(null),
           fetch(ML+'/orders/'+o.id+'/fees',{headers:hdr(token)}).then(r=>r.ok?r.json():null).catch(()=>null)
         ]);
-        return calcular(o,ship,fees);
+        return calcular(o,ship,fees,useBonifCost);
       }));
       processed.push(...results);
     }
@@ -221,7 +233,7 @@ app.get('/debug/order/:id',async(req,res)=>{
     if(order.shipping?.id){const sr=await fetch(ML+'/shipments/'+order.shipping.id,{headers:hdr(token)});ship=await sr.json();}
     const item=order.order_items?.[0]||{};
     const modal=getModal(order,ship);
-    const envio=getEnvio(order,ship,fees,modal);
+    const envio=getEnvio(order,ship,fees,modal,true); // debug siempre muestra costo bruto
     res.json({
       id:order.id, sku:item.item?.seller_sku, titulo:item.item?.title,
       total_amount:order.total_amount, sale_fee:item.sale_fee,
