@@ -165,7 +165,7 @@ function calcular(order, ship, fees, useBonifCost=false){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'7.3',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'7.4',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -321,27 +321,23 @@ app.get('/mercado/search',async(req,res)=>{
     if(q){url1+=`&q=${encodeURIComponent(q)}`;url2+=`&q=${encodeURIComponent(q)}`;}
     if(category){url1+=`&category=${category}`;url2+=`&category=${category}`;}
 
-    // Sin token para búsqueda pública - evita el error UNAUTHORIZED
-    const headers={};
-    // Si hay token válido, usarlo - si no, búsqueda pública sin auth
-    if(token) headers['Authorization']=`Bearer ${token}`;
+    // Headers que simulan browser para evitar bloqueo de ML
+    const browserHeaders={
+      'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept':'application/json, text/plain, */*',
+      'Accept-Language':'es-AR,es;q=0.9',
+      'Referer':'https://www.mercadolibre.com.ar/',
+      'Origin':'https://www.mercadolibre.com.ar'
+    };
+    // Agregar token si está disponible (mejora rate limit)
+    if(token) browserHeaders['Authorization']=`Bearer ${token}`;
 
     const[d1,d2]=await Promise.all([
-      fetch(url1,{headers}).then(r=>r.json()).catch(()=>({})),
-      fetch(url2,{headers}).then(r=>r.json()).catch(()=>({}))
+      fetch(url1,{headers:browserHeaders}).then(r=>r.json()).catch(()=>({})),
+      fetch(url2,{headers:browserHeaders}).then(r=>r.json()).catch(()=>({}))
     ]);
 
-    // Si da UNAUTHORIZED, reintentar sin token
-    const d1ok=(d1.results||[]).length>0;
-    const d2ok=(d2.results||[]).length>0;
     let r1=d1,r2=d2;
-    if(!d1ok&&!d2ok&&token){
-      const[rd1,rd2]=await Promise.all([
-        fetch(url1).then(r=>r.json()).catch(()=>({})),
-        fetch(url2).then(r=>r.json()).catch(()=>({}))
-      ]);
-      r1=rd1;r2=rd2;
-    }
 
     // Combinar y deduplicar, sold_quantity_desc primero
     const seen=new Set();
@@ -363,17 +359,21 @@ app.get('/mercado/search',async(req,res)=>{
 app.get('/mercado/seller',async(req,res)=>{
   const token=req.headers['x-ml-token']; // opcional para datos públicos
   const{q}=req.query;if(!/^\d+$/.test(q))return res.json({error:'User ID numérico',seller:{},items:[]});
-  try{const[sR,iR]=await Promise.all([fetch(ML+'/users/'+q,{headers:hdr(token)}),fetch(ML+'/sites/MLA/search?seller_id='+q+'&limit=50&sort=sold_quantity_desc',{headers:hdr(token)})]);res.json({seller:await sR.json(),items:(await iR.json()).results||[]});}
+  const bh={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36','Accept':'application/json','Referer':'https://www.mercadolibre.com.ar/'};
+  if(token)bh['Authorization']=`Bearer ${token}`;
+  try{const[sR,iR]=await Promise.all([fetch(ML+'/users/'+q,{headers:bh}),fetch(ML+'/sites/MLA/search?seller_id='+q+'&limit=50&sort=sold_quantity_desc',{headers:bh})]);res.json({seller:await sR.json(),items:(await iR.json()).results||[]});}
   catch(e){res.status(500).json({error:e.message});}
 });
 app.get('/mercado/item',async(req,res)=>{
   const token=req.headers['x-ml-token']; // opcional
-  try{res.json(await fetch(ML+'/items/'+req.query.id,{headers:hdr(token)}).then(r=>r.json()));}
+  const bhi={'User-Agent':'Mozilla/5.0','Accept':'application/json'};if(token)bhi['Authorization']=`Bearer ${token}`;
+  try{res.json(await fetch(ML+'/items/'+req.query.id,{headers:bhi}).then(r=>r.json()));}
   catch(e){res.status(500).json({error:e.message});}
 });
 app.get('/mercado/ean',async(req,res)=>{
   const token=req.headers['x-ml-token']; // opcional
-  try{res.json(await fetch(ML+'/sites/MLA/search?q='+encodeURIComponent(req.query.code)+'&limit=20',{headers:hdr(token)}).then(r=>r.json()));}
+  const bhe={'User-Agent':'Mozilla/5.0','Accept':'application/json'};if(token)bhe['Authorization']=`Bearer ${token}`;
+  try{res.json(await fetch(ML+'/sites/MLA/search?q='+encodeURIComponent(req.query.code)+'&limit=20',{headers:bhe}).then(r=>r.json()));}
   catch(e){res.status(500).json({error:e.message});}
 });
 
