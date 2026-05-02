@@ -165,7 +165,7 @@ function calcular(order, ship, fees, useBonifCost=false){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'7.1',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'7.2',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -311,19 +311,42 @@ app.post('/reconcile',async(req,res)=>{
 app.get('/mercado/search',async(req,res)=>{
   const token=req.headers['x-ml-token'];if(!token)return res.status(401).json({error:'Token requerido'});
   try{
-    const{q,category,sort='sold_quantity_desc',limit=50}=req.query;
-    let url=ML+'/sites/MLA/search?limit='+limit+'&sort='+sort;
-    if(q) url+='&q='+encodeURIComponent(q);
-    if(category) url+='&category='+category;
-    const r=await fetch(url,{headers:hdr(token)});
-    const data=await r.json();
-    // Si no hay resultados con categoría, reintentar sin categoría
-    if(category&&(!data.results||data.results.length===0)){
-      let url2=ML+'/sites/MLA/search?limit='+limit+'&sort='+sort+'&q='+encodeURIComponent(q||'');
-      const r2=await fetch(url2,{headers:hdr(token)});
-      return res.json(await r2.json());
+    const{q,category,sort='relevance',limit=50}=req.query;
+    // Hacer dos búsquedas en paralelo: una por relevance y otra por sold_quantity
+    // para tener tanto los más relevantes como los más vendidos
+    let url=`${ML}/sites/MLA/search?limit=${limit}&sort=${sort}`;
+    if(q) url+=`&q=${encodeURIComponent(q)}`;
+    if(category) url+=`&category=${category}`;
+    
+    // También buscar por sold_quantity_desc para obtener los más vendidos
+    let urlTop=`${ML}/sites/MLA/search?limit=${limit}&sort=sold_quantity_desc`;
+    if(q) urlTop+=`&q=${encodeURIComponent(q)}`;
+    if(category) urlTop+=`&category=${category}`;
+    
+    const[r1,r2]=await Promise.all([
+      fetch(url,{headers:hdr(token)}).then(r=>r.json()).catch(()=>({})),
+      fetch(urlTop,{headers:hdr(token)}).then(r=>r.json()).catch(()=>({}))
+    ]);
+    
+    // Combinar y deduplicar resultados, priorizando los de sold_quantity_desc
+    const seen=new Set();
+    const combined=[];
+    for(const item of [...(r2.results||[]),...(r1.results||[])]){
+      if(!seen.has(item.id)){
+        seen.add(item.id);
+        combined.push(item);
+      }
     }
-    res.json(data);
+    
+    // Si no hay resultados con categoría, reintentar sin ella
+    if(category&&combined.length===0){
+      let url3=`${ML}/sites/MLA/search?limit=${limit}&sort=sold_quantity_desc&q=${encodeURIComponent(q||'')}`;
+      const r3=await fetch(url3,{headers:hdr(token)});
+      const d3=await r3.json();
+      return res.json(d3);
+    }
+    
+    res.json({...r1,results:combined,paging:{...r1.paging,total:combined.length}});
   }catch(e){res.status(500).json({error:e.message});}
 });
 app.get('/mercado/seller',async(req,res)=>{
