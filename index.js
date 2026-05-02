@@ -70,15 +70,23 @@ function getEnvio(order, ship, fees, modal){
   const sc = ship?.cost_components?.seller_shipping_cost;
   if(typeof sc==='number'&&sc!==0) return {costo:Math.abs(sc),bonif:0,cordon:null};
 
-  // 4. ship.lead_time.cost — disponible ANTES de la entrega (not_delivered)
-  //    Este es el costo real que ML va a cobrar, igual al que muestra en el portal
+  // 4. ship.lead_time.cost — disponible ANTES de la entrega, SOLO si free_shipping
   const ltCost = ship?.lead_time?.cost;
-  if(typeof ltCost==='number'&&ltCost>0) return {costo:ltCost,bonif:0,cordon:null};
+  const freeShipLt = ship?.free_shipping===true || order.shipping?.free_shipping===true;
+  if(typeof ltCost==='number' && ltCost>0 && freeShipLt)
+    return {costo:ltCost,bonif:0,cordon:null};
 
-  // 5. ship.shipping_option.cost — precio de la opción de envío
+  // 5. ship.shipping_option.cost — SOLO si el envío es gratis para el comprador
+  // Si free_shipping=false, el comprador pagó → costo del vendedor = $0
   const soCost = ship?.shipping_option?.cost;
-  if(typeof soCost==='number'&&soCost>0) return {costo:soCost,bonif:0,cordon:null};
+  const freeShip = ship?.free_shipping===true || order.shipping?.free_shipping===true;
+  if(typeof soCost==='number' && soCost>0 && freeShip)
+    return {costo:soCost,bonif:0,cordon:null};
 
+  // Si el comprador pagó más que total_amount → pagó el envío → costo vendedor = $0
+  const buyerPaid = (order.payments||[]).reduce((s,p)=>s+Math.abs(p.total_paid_amount||0),0);
+  if(buyerPaid > order.total_amount * 1.05) return {costo:0,bonif:0,cordon:null};
+  
   if((order.tags||[]).includes('no_shipping')) return {costo:0,bonif:0,cordon:null};
   return {costo:0,bonif:0,cordon:null};
 }
@@ -146,7 +154,7 @@ function calcular(order, ship, fees){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'6.8',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'6.9',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
