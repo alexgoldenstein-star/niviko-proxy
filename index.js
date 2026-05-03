@@ -141,15 +141,24 @@ function calcular(order, ship, fees, useBonifCost=false, umbralFreeShip=33000){
 
   // Comisión: fees.fee_detail[mercadolibre] es la fuente más precisa
   // IMPORTANTE: fee_detail[mercadolibre] incluye TODO lo que cobra ML:
-  // - comisión porcentual
-  // - costo fijo (para publicaciones < $33k)
-  // - costo de financiación (cuotas)
-  // Por lo tanto si usamos fee_detail, las cuotas ya están incluidas (no duplicar)
+  // - comisión porcentual, costo fijo, cuotas
+  // Solo disponible DESPUÉS de la entrega (not_delivered → vacío)
   const feeML = (fees?.fee_detail||[]).find(f=>f.type==='mercadolibre'||f.type==='listing')?.value;
   const hasFeeDetail = feeML && feeML < 0;
+  
+  // Fallback para not_delivered: sale_fee puede ser el fee de 1 unidad
+  // Para pack_order: multiplicar por cantidad para obtener el fee total
+  const qty = item.quantity||1;
+  const saleFeeTotal = Math.abs(item.sale_fee||0) * (tags.includes('pack_order') && qty>1 ? qty : 1);
+  
+  // Si sale_fee total es más razonable (>8% de venta), usarlo
+  // Si no, estimar por porcentaje base (14%)
+  const saleFeeRatio = venta>0 ? saleFeeTotal/venta : 0;
+  const comisionFallback = saleFeeRatio > 0.08 ? saleFeeTotal : venta*0.14;
+  
   const comision = hasFeeDetail
-    ? Math.abs(feeML)                          // fee_detail incluye comisión + cuotas + costo fijo
-    : Math.abs(item.sale_fee||venta*0.14);     // fallback: solo comisión base
+    ? Math.abs(feeML)        // fee_detail → más preciso, incluye todo
+    : comisionFallback;      // fallback: sale_fee*qty para pack, o 14% estimado
 
   // ── CUOTAS ───────────────────────────────────────────────────
   // Si tenemos fees.fee_detail, las cuotas YA están incluidas en la comisión
@@ -216,7 +225,7 @@ function calcular(order, ship, fees, useBonifCost=false, umbralFreeShip=33000){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'8.6',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'8.7',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
