@@ -54,14 +54,38 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
   if(modal==='Flex'){
     const cordon = getCordon(ciudad);
     const costoCordon = CORD[cordon]||CORD[3];
-    // El comprador paga el envío Flex → ese dinero llega a nosotros vía ML
-    // shipping_option.cost = lo que pagó el comprador (ingreso para el vendedor)
-    // CORD[cordon] = lo que nos cobra la logística Flex (egreso del vendedor)
-    // Ganancia/pérdida neta del envío = ingreso - egreso
-    const ingresoEnvio = ship?.shipping_option?.cost || ship?.lead_time?.cost || 849;
+    const flexTags = order.tags||[];
+    // Cuánto pagó el comprador por el envío Flex
+    // Si shipping_option.cost > 0 → el comprador pagó ese monto
+    // Si shipping_option.cost = 0 → ML subsidió el envío (new_buyer, churn, etc.)
+    // En ese caso el vendedor paga el cordón completo sin ingreso compensatorio
+    const soCost = ship?.shipping_option?.cost;
+    const ltCost = ship?.lead_time?.cost;
+    const mlSubsidiaFlex = flexTags.some(t=>['new_buyer_free_shipping','churn-buyer-free-shipping','buyer_free_shipping'].includes(t));
+    
+    // Si ML subsidia el envío al comprador (new_buyer, churn, etc.):
+    // ML le paga al vendedor la bonificación de envío
+    // El monto real está en fees.fee_detail post-entrega
+    // Estimación: si ML subsidia, el ingreso ≈ costo del cordón (ML cubre el costo)
+    // En la práctica ML puede pagar más o menos - usar fees post-entrega cuando disponible
+    const feeShip = (fees?.fee_detail||[]).find(f=>f.type==='shipping')?.value;
+    
+    let ingresoEnvio;
+    if(typeof soCost==='number' && soCost>0){
+      // Comprador pagó explícitamente
+      ingresoEnvio = soCost;
+    } else if(typeof feeShip==='number' && feeShip>0){
+      // fees.fee_detail[shipping] positivo = ML bonificó al vendedor (post-entrega)
+      ingresoEnvio = feeShip;
+    } else if(mlSubsidiaFlex){
+      // ML subsidia pero no tenemos el monto exacto aún (not_delivered)
+      // Estimamos: ML suele pagar el costo del cordón + algo extra
+      // Usamos costoCordon como estimación conservadora (neto ~= 0)
+      ingresoEnvio = costoCordon;
+    } else {
+      ingresoEnvio = 0;
+    }
     const gananciaEnvio = ingresoEnvio - costoCordon;
-    // costoEnvio negativo = ganancia en el envío (ingreso > costo logística)
-    // costoEnvio positivo = pérdida en el envío (costo logística > ingreso)
     return {costo:-gananciaEnvio, bonif:ingresoEnvio, cordon, ingresoEnvio, costoCordon};
   }
   // Correo: buscar costo en orden de disponibilidad
@@ -234,7 +258,7 @@ const costo = prod ? prod.ars*(item.quantity||1) : 0; // multiplicar por unidade
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'8.8',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'9.0',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -316,6 +340,11 @@ app.get('/debug/order/:id',async(req,res)=>{
       SHIP_COST_COMPONENTS:ship?.cost_components,
       SHIP_LEAD_TIME:ship?.lead_time,
       SHIP_SHIPPING_OPTION:ship?.shipping_option,
+      SHIP_COST_COMPONENTS_FULL:ship?.cost_components,
+      SHIP_RECEIVER_SHIPPING_COST:ship?.cost_components?.receiver_shipping_cost,
+      SHIP_BUYER_SHIPPING_COST:ship?.cost_components?.buyer_shipping_cost,
+      SHIP_COST_RAW:ship?.cost,
+      FEE_DETAIL:fees?.fee_detail,
       FEE_DETAIL:fees?.fee_detail,
       FEE_SHIPPING:fees?.fee_detail?.find?.(f=>f.type==='shipping')?.value,
       PAYMENTS:order.payments?.map(p=>({
