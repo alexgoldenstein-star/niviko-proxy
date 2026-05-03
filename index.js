@@ -126,7 +126,7 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
   return {costo:0,bonif:0,cordon:null};
 }
 
-function calcular(order, ship, fees, useBonifCost=false){
+function calcular(order, ship, fees, useBonifCost=false, umbralFreeShip=33000){
   const item = order.order_items?.[0]||{};
   const venta = order.total_amount||0;
   const sku = item.item?.seller_sku||item.item?.id||'';
@@ -196,7 +196,7 @@ function calcular(order, ship, fees, useBonifCost=false){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'8.1',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'8.2',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -246,7 +246,7 @@ app.get('/orders/all',async(req,res)=>{
           o.shipping?.id?fetch(ML+'/shipments/'+o.shipping.id,{headers:hdr(token)}).then(r=>r.ok?r.json():null).catch(()=>null):Promise.resolve(null),
           fetch(ML+'/orders/'+o.id+'/fees',{headers:hdr(token)}).then(r=>r.ok?r.json():null).catch(()=>null)
         ]);
-        return calcular(o,ship,fees,useBonifCost);
+        return calcular(o,ship,fees,useBonifCost,umbralFreeShip);
       }));
       processed.push(...results);
     }
@@ -265,7 +265,7 @@ app.get('/debug/order/:id',async(req,res)=>{
     if(order.shipping?.id){const sr=await fetch(ML+'/shipments/'+order.shipping.id,{headers:hdr(token)});ship=await sr.json();}
     const item=order.order_items?.[0]||{};
     const modal=getModal(order,ship);
-    const envio=getEnvio(order,ship,fees,modal,true); // debug siempre muestra costo bruto
+    const envio=getEnvio(order,ship,fees,modal,true,{umbralFreeShip:33000}); // debug
     res.json({
       id:order.id, sku:item.item?.seller_sku, titulo:item.item?.title,
       total_amount:order.total_amount, sale_fee:item.sale_fee,
@@ -289,7 +289,7 @@ app.get('/debug/order/:id',async(req,res)=>{
       CIUDAD:ship?.receiver_address?.city?.name,
       MODAL_DETECTADA:modal,
       ENVIO:envio,
-      CALCULO:calcular(order,ship,fees)
+      CALCULO:calcular(order,ship,fees,false,33000)
     });
   }catch(e){res.status(500).json({error:e.message});}
 });
