@@ -70,33 +70,43 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false){
   const sc = ship?.cost_components?.seller_shipping_cost;
   if(typeof sc==='number'&&sc!==0) return {costo:Math.abs(sc),bonif:0,cordon:null};
 
-  // 4. ship.lead_time.cost — disponible ANTES de la entrega, SOLO si free_shipping
+  // Determinar quién paga el envío
+  const freeShip = ship?.free_shipping===true || order.shipping?.free_shipping===true;
+  
+  // Si free_shipping=false → el comprador paga el envío (transacción separada)
+  // El costo del vendedor es $0 en ese caso
+  // Excepto si useBonifCost=true donde queremos ver el costo bruto
+  if(!freeShip && !useBonifCost){
+    // Verificar que no sea una situación donde el vendedor sí paga
+    // (fees.fee_detail[shipping] negativo = ML cobró envío al vendedor)
+    const fShipFee=(fees?.fee_detail||[]).find(f=>f.type==='shipping')?.value;
+    if(typeof fShipFee==='number' && fShipFee<0)
+      return {costo:Math.abs(fShipFee),bonif:0,cordon:null};
+    // Sin fee de envío y free_shipping=false → comprador pagó → vendedor $0
+    return {costo:0,bonif:0,cordon:null};
+  }
+
+  // 4. ship.lead_time.cost — SOLO si free_shipping (vendedor paga)
   const ltCost = ship?.lead_time?.cost;
-  const freeShipLt = ship?.free_shipping===true || order.shipping?.free_shipping===true;
-  if(typeof ltCost==='number' && ltCost>0 && freeShipLt)
+  if(typeof ltCost==='number' && ltCost>0 && freeShip)
     return {costo:ltCost,bonif:0,cordon:null};
 
-  // 5. ship.shipping_option.cost — SOLO si el envío es gratis para el comprador
-  // Si free_shipping=false, el comprador pagó → costo del vendedor = $0
+  // 5. ship.shipping_option.cost — SOLO si free_shipping
   const soCost = ship?.shipping_option?.cost;
-  const freeShip = ship?.free_shipping===true || order.shipping?.free_shipping===true;
   if(typeof soCost==='number' && soCost>0 && freeShip)
     return {costo:soCost,bonif:0,cordon:null};
 
-  // Si el comprador pagó más que total_amount → pagó el envío → costo vendedor = $0
-  const buyerPaid = (order.payments||[]).reduce((s,p)=>s+Math.abs(p.total_paid_amount||0),0);
-  if(buyerPaid > order.total_amount * 1.05) return {costo:0,bonif:0,cordon:null};
-  
+  // Si el comprador pagó más que total_amount → pagó el envío → $0
+  const buyerPaid=(order.payments||[]).reduce((s,p)=>s+Math.abs(p.total_paid_amount||0),0);
+  if(buyerPaid > order.total_amount*1.05) return {costo:0,bonif:0,cordon:null};
+
   if((order.tags||[]).includes('no_shipping')) return {costo:0,bonif:0,cordon:null};
 
-  // useBonifCost=true: aunque ML bonifique el envío, el usuario quiere verlo como gasto
-  // Usamos list_cost (costo bruto antes de la bonificación) como costo real
+  // useBonifCost=true: mostrar costo bruto aunque ML bonifique
   if(useBonifCost){
-    const listCost = ship?.shipping_option?.list_cost || ship?.lead_time?.list_cost;
-    if(typeof listCost==='number' && listCost>0) return {costo:listCost,bonif:0,cordon:null};
-    // Si no hay list_cost pero hay shipping_option.cost, usarlo igual
-    const soCostRaw = ship?.shipping_option?.cost;
-    if(typeof soCostRaw==='number' && soCostRaw>0) return {costo:soCostRaw,bonif:0,cordon:null};
+    const listCost=ship?.shipping_option?.list_cost||ship?.lead_time?.list_cost;
+    if(typeof listCost==='number'&&listCost>0) return {costo:listCost,bonif:0,cordon:null};
+    if(typeof soCost==='number'&&soCost>0) return {costo:soCost,bonif:0,cordon:null};
   }
 
   return {costo:0,bonif:0,cordon:null};
@@ -143,7 +153,13 @@ function calcular(order, ship, fees, useBonifCost=false){
   const estado = ship?.receiver_address?.state?.name||'';
   const modal = getModal(order,ship);
   const {costo:costoEnvio,bonif:bonifEnvio,cordon} = getEnvio(order,ship,fees,modal,useBonifCost);
-  const ganancia = venta-comision-cuotas-costo-iva-pub-iibb-costoEnvio;
+  // Retenciones impositivas que ML descuenta automáticamente:
+  // Impuesto Créditos y Débitos: 0.6% fijo
+  // Retención IIBB SIRTAC: 0.6% fijo
+  // IIBB provinciales: ~0.025% variable según provincia (no predecible por orden)
+  // Total estimado: 1.2% del precio de venta
+  const retencionesML = Math.round(venta * 0.012);
+  const ganancia = venta-comision-cuotas-costo-iva-pub-iibb-costoEnvio-retencionesML;
 
   return {
     id:order.id, fecha:(order.date_created||'').split('T')[0],
@@ -153,6 +169,7 @@ function calcular(order, ship, fees, useBonifCost=false){
     costo:Math.round(costo), iva:Math.round(iva), ivaPct:prod?.iva||21,
     pub:Math.round(pub), iibb:Math.round(iibb),
     costoEnvio:Math.round(costoEnvio), bonifEnvio:Math.round(bonifEnvio||0),
+    retencionesML:Math.round(retencionesML),
     ganancia:Math.round(ganancia), pct:venta>0?ganancia/venta:0,
     sinProducto:!prod,
     sinZona:modal==='Flex'&&!ZONA[String(ciudad).toLowerCase().trim()],
@@ -165,7 +182,7 @@ function calcular(order, ship, fees, useBonifCost=false){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'7.7',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'8.0',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -414,6 +431,7 @@ Respondé SOLO con un JSON válido, sin texto adicional, sin markdown:
       method:'POST',
       headers:{
         'Content-Type':'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY||'',
         'anthropic-version':'2023-06-01',
         'anthropic-beta':'web-search-2025-03-05'
       },
