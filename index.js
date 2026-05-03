@@ -258,7 +258,7 @@ const costo = prod ? prod.ars*(item.quantity||1) : 0; // multiplicar por unidade
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'9.1',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'9.2',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -593,8 +593,11 @@ app.get('/plataforma/publicaciones',async(req,res)=>{
   try{
     // Listar publicaciones activas
     const itemsR=await fetch(`${ML}/users/${seller_id}/items/search?status=active&limit=${limit}`,{headers:hdr(token)}).then(r=>r.json());
-    const ids=(itemsR.results||[]);
-    if(!ids.length)return res.json({items:[],total:0});
+    // results can be array of strings (ids) or objects
+    const rawIds=itemsR.results||itemsR.items||[];
+    const ids=rawIds.map(r=>typeof r==='string'?r:(r.id||r)).filter(Boolean);
+    if(!ids.length)return res.json({items:[],total:0,raw:itemsR});
+    console.log('[publicaciones] Found IDs:', ids.length, 'First:', ids[0]);
     
     // Obtener detalles en lotes de 20
     const chunks=[];
@@ -606,10 +609,12 @@ app.get('/plataforma/publicaciones',async(req,res)=>{
         fetch(`${ML}/items?ids=${chunk.join(',')}&attributes=id,title,price,available_quantity,sold_quantity,listing_type_id,condition,permalink,thumbnail,catalog_listing`,{headers:hdr(token)}).then(r=>r.json()),
         Promise.all(chunk.map(id=>fetch(`${ML}/items/${id}/health`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({})))) 
       ]);
-      const detArr=Array.isArray(detR)?detR:[];
+      // ML /items?ids= returns [{code:200, body:{...}}] or [{id:...}] directly
+      const detArr=Array.isArray(detR)?detR:(detR.results||[]);
       detArr.forEach((d,i)=>{
-        if(!d.body&&!d.id)return;
-        const item=d.body||d;
+        // Handle both response formats
+        const item=(d.code===200&&d.body)?d.body:d;
+        if(!item?.id)return;
         const health=healthBatch[i]||{};
         items.push({
           id:item.id,
@@ -630,6 +635,7 @@ app.get('/plataforma/publicaciones',async(req,res)=>{
         });
       });
     }
+    console.log('[publicaciones] Items processed:', items.length);
     res.json({items,total:items.length,seller_id});
   }catch(e){res.status(500).json({error:e.message});}
 });
@@ -658,15 +664,22 @@ app.get('/plataforma/descuentos',async(req,res)=>{
   if(!token)return res.status(401).json({error:'Token requerido'});
   const{seller_id}=req.query;
   try{
-    const[promoR,dealR]=await Promise.all([
-      fetch(`${ML}/users/${seller_id}/promotions?status=active`,{headers:hdr(token)}).then(r=>r.ok?r.json():{results:[]}).catch(()=>({results:[]})),
+    // Try multiple endpoints for promotions/deals
+    const[promoR,dealR,campaignR]=await Promise.all([
+      fetch(`${ML}/users/${seller_id}/promotions`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({})),
       fetch(`${ML}/users/${seller_id}/deals`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({})),
+      fetch(`${ML}/campaigns?seller_id=${seller_id}`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({})),
     ]);
-    const promos=promoR.results||promoR.promotions||promoR||[];
+    // Normalize responses - ML returns different structures
+    const promos=[
+      ...(Array.isArray(promoR)?promoR:(promoR.results||promoR.promotions||[])),
+      ...(Array.isArray(dealR)?dealR:(dealR.results||dealR.deals||[])),
+      ...(Array.isArray(campaignR)?campaignR:(campaignR.results||[])),
+    ];
     res.json({
-      activas:Array.isArray(promos)?promos:[],
-      deals:dealR.results||dealR.deals||[],
-      total:Array.isArray(promos)?promos.length:0
+      activas:promos,
+      raw:{promoR,dealR,campaignR}, // debug
+      total:promos.length
     });
   }catch(e){res.status(500).json({error:e.message});}
 });
