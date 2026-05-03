@@ -258,7 +258,7 @@ const costo = prod ? prod.ars*(item.quantity||1) : 0; // multiplicar por unidade
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'9.0',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'9.1',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -538,6 +538,231 @@ Respondé SOLO con un JSON válido, sin texto adicional, sin markdown:
 
     const marketData=JSON.parse(jsonMatch[0]);
     res.json({ok:true,data:marketData});
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+
+// ── GESTIÓN DE PLATAFORMA ─────────────────────────────────────
+
+// 1. REPUTACIÓN & MÉTRICAS DEL ALGORITMO
+app.get('/plataforma/reputacion',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token)return res.status(401).json({error:'Token requerido'});
+  const{seller_id}=req.query;
+  try{
+    const[repR,shipR,qR]=await Promise.all([
+      fetch(`${ML}/users/${seller_id}`,{headers:hdr(token)}).then(r=>r.json()),
+      fetch(`${ML}/users/${seller_id}/shipping_options`,{headers:hdr(token)}).then(r=>r.json()).catch(()=>({})),
+      fetch(`${ML}/questions/search?seller_id=${seller_id}&status=UNANSWERED&limit=5`,{headers:hdr(token)}).then(r=>r.json()).catch(()=>({})),
+    ]);
+    const rep=repR.seller_reputation||{};
+    const trans=rep.transactions||{};
+    const perf=rep.metrics||{};
+    res.json({
+      nivel:rep.level_id||'—',
+      power_seller:repR.site_status||'—',
+      transacciones_ok:trans.completed||0,
+      transacciones_periodo:trans.period||'—',
+      cancelaciones:{pct:perf.cancellations?.rate||0,valor:perf.cancellations?.value||0,umbral:perf.cancellations?.excluded_categories||0},
+      reclamos:{pct:perf.claims?.rate||0,valor:perf.claims?.value||0},
+      despacho_tarde:{pct:perf.delayed_handling_time?.rate||0,valor:perf.delayed_handling_time?.value||0},
+      preguntas_sin_responder:qR.total||0,
+      // Lo que el algoritmo necesita según nivel actual
+      recomendaciones:buildRecoAlgo(rep)
+    });
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+function buildRecoAlgo(rep){
+  const recos=[];
+  const m=rep.metrics||{};
+  if((m.cancellations?.rate||0)>0.02) recos.push({tipo:'cancelaciones',msg:'Tasa de cancelaciones alta (>2%). Evitar cancelar órdenes confirmadas.',urgencia:'alta'});
+  if((m.claims?.rate||0)>0.01) recos.push({tipo:'reclamos',msg:'Tasa de reclamos alta (>1%). Revisar calidad del embalaje y descripción de productos.',urgencia:'alta'});
+  if((m.delayed_handling_time?.rate||0)>0.02) recos.push({tipo:'despacho',msg:'Despacho tardío alto (>2%). Despachar en menos de 24hs para mejorar posicionamiento.',urgencia:'alta'});
+  if(rep.level_id==='5_red') recos.push({tipo:'reputacion',msg:'Reputación roja. Prioridad máxima: resolver reclamos pendientes y mejorar métricas.',urgencia:'critica'});
+  if(rep.level_id==='4_orange') recos.push({tipo:'reputacion',msg:'Reputación naranja. En riesgo de perder MercadoLíder. Mejorar cancelaciones y reclamos.',urgencia:'alta'});
+  if(recos.length===0) recos.push({tipo:'ok',msg:'Reputación saludable. Mantener tiempo de despacho y calidad de embalaje.',urgencia:'baja'});
+  return recos;
+}
+
+// 2. PUBLICACIONES + SCORE DE SALUD
+app.get('/plataforma/publicaciones',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token)return res.status(401).json({error:'Token requerido'});
+  const{seller_id,limit=50}=req.query;
+  try{
+    // Listar publicaciones activas
+    const itemsR=await fetch(`${ML}/users/${seller_id}/items/search?status=active&limit=${limit}`,{headers:hdr(token)}).then(r=>r.json());
+    const ids=(itemsR.results||[]);
+    if(!ids.length)return res.json({items:[],total:0});
+    
+    // Obtener detalles en lotes de 20
+    const chunks=[];
+    for(let i=0;i<ids.length;i+=20) chunks.push(ids.slice(i,i+20));
+    
+    const items=[];
+    for(const chunk of chunks){
+      const[detR,healthBatch]=await Promise.all([
+        fetch(`${ML}/items?ids=${chunk.join(',')}&attributes=id,title,price,available_quantity,sold_quantity,listing_type_id,condition,permalink,thumbnail,catalog_listing`,{headers:hdr(token)}).then(r=>r.json()),
+        Promise.all(chunk.map(id=>fetch(`${ML}/items/${id}/health`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({})))) 
+      ]);
+      const detArr=Array.isArray(detR)?detR:[];
+      detArr.forEach((d,i)=>{
+        if(!d.body&&!d.id)return;
+        const item=d.body||d;
+        const health=healthBatch[i]||{};
+        items.push({
+          id:item.id,
+          titulo:item.title,
+          precio:item.price,
+          stock:item.available_quantity||0,
+          vendidos:item.sold_quantity||0,
+          tipo:item.listing_type_id,
+          catalogo:item.catalog_listing||false,
+          thumbnail:item.thumbnail,
+          permalink:item.permalink,
+          // Score de salud
+          score:health.health||null,
+          score_detalles:health.issues||[],
+          // Alertas básicas
+          sin_stock:((item.available_quantity||0)===0),
+          precio_bajo:(item.price<5000),
+        });
+      });
+    }
+    res.json({items,total:items.length,seller_id});
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+// 3. RECLAMOS
+app.get('/plataforma/reclamos',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token)return res.status(401).json({error:'Token requerido'});
+  const{seller_id,status='opened',limit=20}=req.query;
+  try{
+    const r=await fetch(`${ML}/post-purchase/v1/claims?seller_id=${seller_id}&status=${status}&limit=${limit}`,{headers:hdr(token)});
+    const data=await r.json();
+    const claims=data.data||data.results||[];
+    // Para cada reclamo, obtener el timeline
+    const withTimeline=await Promise.all(claims.slice(0,10).map(async c=>{
+      const tR=await fetch(`${ML}/post-purchase/v1/claims/${c.id}/timeline`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({}));
+      return {...c,timeline:tR.messages||tR.history||[]};
+    }));
+    res.json({claims:withTimeline,total:data.paging?.total||claims.length});
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+// 4. DESCUENTOS Y PROMOCIONES
+app.get('/plataforma/descuentos',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token)return res.status(401).json({error:'Token requerido'});
+  const{seller_id}=req.query;
+  try{
+    const[promoR,dealR]=await Promise.all([
+      fetch(`${ML}/users/${seller_id}/promotions?status=active`,{headers:hdr(token)}).then(r=>r.ok?r.json():{results:[]}).catch(()=>({results:[]})),
+      fetch(`${ML}/users/${seller_id}/deals`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({})),
+    ]);
+    const promos=promoR.results||promoR.promotions||promoR||[];
+    res.json({
+      activas:Array.isArray(promos)?promos:[],
+      deals:dealR.results||dealR.deals||[],
+      total:Array.isArray(promos)?promos.length:0
+    });
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+// 5. ANÁLISIS IA DE PUBLICACIÓN
+app.post('/ai/publicacion',async(req,res)=>{
+  const{item_id,titulo,precio,score,issues,vendidos,competencia}=req.body;
+  try{
+    const prompt=`Analizá esta publicación de MercadoLibre Argentina y dá recomendaciones concretas.
+
+Publicación:
+- Título: "${titulo}"
+- Precio: $${precio?.toLocaleString('es-AR')}
+- Unidades vendidas: ${vendidos}
+- Score de salud ML: ${score||'no disponible'}/100
+- Problemas detectados por ML: ${JSON.stringify(issues||[])}
+${competencia?`- Contexto de mercado: ${JSON.stringify(competencia)}`:''}
+
+Respondé SOLO con JSON válido:
+{
+  "resumen": "string - 2 oraciones sobre el estado general",
+  "score_estimado": number,
+  "mejoras_titulo": ["string", "string"],
+  "mejoras_descripcion": ["string"],
+  "mejoras_precio": "string",
+  "alertas": ["string"],
+  "prioridad": "alta|media|baja",
+  "titulo_sugerido": "string"
+}`;
+
+    const r=await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'x-api-key':process.env.ANTHROPIC_API_KEY||'',
+        'anthropic-version':'2023-06-01',
+        'anthropic-beta':'web-search-2025-03-05'
+      },
+      body:JSON.stringify({
+        model:'claude-sonnet-4-20250514',
+        max_tokens:1500,
+        tools:[{type:'web_search_20250305',name:'web_search'}],
+        messages:[{role:'user',content:prompt}]
+      })
+    });
+    const data=await r.json();
+    if(!r.ok)return res.status(r.status).json({error:data.error?.message||'Error IA'});
+    const text=data.content?.find(b=>b.type==='text')?.text||'';
+    const match=text.match(/\{[\s\S]*\}/);
+    if(!match)return res.status(500).json({error:'Sin JSON en respuesta',raw:text.substring(0,200)});
+    res.json({ok:true,data:JSON.parse(match[0])});
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+// 6. IA PARA RECLAMOS
+app.post('/ai/reclamo',async(req,res)=>{
+  const{tipo,descripcion,producto,dias_abierto,historial}=req.body;
+  try{
+    const prompt=`Sos el equipo de atención al cliente de NIVIKO, una empresa argentina que vende en MercadoLibre.
+    
+Reclamo recibido:
+- Tipo: ${tipo||'sin_especificar'}
+- Producto: ${producto}
+- Días abierto: ${dias_abierto||0}
+- Descripción del comprador: "${descripcion}"
+- Historial de mensajes: ${JSON.stringify(historial||[])}
+
+Respondé SOLO con JSON válido:
+{
+  "tipo_detectado": "no_llego|llegó_dañado|no_era_lo_esperado|quiere_devolver|otro",
+  "urgencia": "alta|media|baja",
+  "respuesta_sugerida": "string - respuesta completa en español, profesional y empática",
+  "acciones_recomendadas": ["string"],
+  "escalar": boolean,
+  "tiempo_respuesta_max": "string"
+}`;
+
+    const r=await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'x-api-key':process.env.ANTHROPIC_API_KEY||'',
+        'anthropic-version':'2023-06-01'
+      },
+      body:JSON.stringify({
+        model:'claude-sonnet-4-20250514',
+        max_tokens:1000,
+        messages:[{role:'user',content:prompt}]
+      })
+    });
+    const data=await r.json();
+    if(!r.ok)return res.status(r.status).json({error:data.error?.message||'Error IA'});
+    const text=data.content?.find(b=>b.type==='text')?.text||'';
+    const match=text.match(/\{[\s\S]*\}/);
+    if(!match)return res.status(500).json({error:'Sin JSON',raw:text.substring(0,200)});
+    res.json({ok:true,data:JSON.parse(match[0])});
   }catch(e){res.status(500).json({error:e.message});}
 });
 
