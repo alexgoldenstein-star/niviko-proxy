@@ -47,7 +47,7 @@ function getModal(order, ship){
 }
 
 // ── COSTO ENVÍO ───────────────────────────────────────────────
-function getEnvio(order, ship, fees, modal, useBonifCost=false){
+function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
   if(modal==='Full') return {costo:0,bonif:0,cordon:null};
   const ciudad = ship?.receiver_address?.city?.name
     ||order.shipping?.receiver_address?.city?.name||'';
@@ -72,17 +72,31 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false){
 
   // Determinar quién paga el envío
   const freeShip = ship?.free_shipping===true || order.shipping?.free_shipping===true;
+  const tags = order.tags||[];
   
-  // Si free_shipping=false → el comprador paga el envío (transacción separada)
-  // El costo del vendedor es $0 en ese caso
-  // Excepto si useBonifCost=true donde queremos ver el costo bruto
-  if(!freeShip && !useBonifCost){
-    // Verificar que no sea una situación donde el vendedor sí paga
-    // (fees.fee_detail[shipping] negativo = ML cobró envío al vendedor)
+  // Umbral ML para envío gratis: productos >= umbral → ML subsidia
+  // Productos < umbral → comprador paga envío → vendedor $0
+  // El toggle (useBonifCost) solo aplica cuando ML subsidia (>=umbral)
+  const umbralFreeShip = cfg?.umbralFreeShip || 33000;
+  const venta = order.total_amount||0;
+  const mlSubsidia = freeShip && venta >= umbralFreeShip;
+  
+  if(!freeShip){
+    // free_shipping=false → comprador paga el envío por su cuenta
+    // El toggle NO aplica aquí - el vendor no tiene costo de envío
     const fShipFee=(fees?.fee_detail||[]).find(f=>f.type==='shipping')?.value;
     if(typeof fShipFee==='number' && fShipFee<0)
       return {costo:Math.abs(fShipFee),bonif:0,cordon:null};
-    // Sin fee de envío y free_shipping=false → comprador pagó → vendedor $0
+    return {costo:0,bonif:0,cordon:null};
+  }
+  
+  // free_shipping=true pero producto < umbral → ML bonifica al comprador
+  // pero podría igual cobrarle al vendedor (verificar fees)
+  if(freeShip && !mlSubsidia){
+    const fShipFee=(fees?.fee_detail||[]).find(f=>f.type==='shipping')?.value;
+    if(typeof fShipFee==='number' && fShipFee<0)
+      return {costo:Math.abs(fShipFee),bonif:0,cordon:null};
+    // Sin fee negativo → vendedor $0
     return {costo:0,bonif:0,cordon:null};
   }
 
@@ -152,7 +166,7 @@ function calcular(order, ship, fees, useBonifCost=false){
     ||order.shipping?.receiver_address?.city?.name||'';
   const estado = ship?.receiver_address?.state?.name||'';
   const modal = getModal(order,ship);
-  const {costo:costoEnvio,bonif:bonifEnvio,cordon} = getEnvio(order,ship,fees,modal,useBonifCost);
+  const {costo:costoEnvio,bonif:bonifEnvio,cordon} = getEnvio(order,ship,fees,modal,useBonifCost,{umbralFreeShip});
   // Retenciones impositivas que ML descuenta automáticamente:
   // Impuesto Créditos y Débitos: 0.6% fijo
   // Retención IIBB SIRTAC: 0.6% fijo
@@ -182,7 +196,7 @@ function calcular(order, ship, fees, useBonifCost=false){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'8.0',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'8.1',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -200,8 +214,9 @@ app.get('/me',async(req,res)=>{
 app.get('/orders/all',async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token)return res.status(401).json({error:'Token requerido'});
-  const{seller_id,from,to,envio_bonif}=req.query;
-  const useBonifCost = envio_bonif==='true'; // si true, cobrar envío aunque ML lo bonifique
+  const{seller_id,from,to,envio_bonif,umbral_free_ship}=req.query;
+  const useBonifCost = envio_bonif==='true';
+  const umbralFreeShip = parseFloat(umbral_free_ship)||33000;
   try{
     let all=[],offset=0,total=null;
     while(total===null||offset<total){
