@@ -139,28 +139,32 @@ function calcular(order, ship, fees, useBonifCost=false, umbralFreeShip=33000){
   const prod = findProd(sku);
   const tags = order.tags||[];
 
-  // Comisión: usar fees.fee_detail[mercadolibre] como fuente primaria
-  // Para pack_order, item.sale_fee puede ser incorrecto (fee de 1 unidad, no de toda la orden)
+  // Comisión: fees.fee_detail[mercadolibre] es la fuente más precisa
+  // IMPORTANTE: fee_detail[mercadolibre] incluye TODO lo que cobra ML:
+  // - comisión porcentual
+  // - costo fijo (para publicaciones < $33k)
+  // - costo de financiación (cuotas)
+  // Por lo tanto si usamos fee_detail, las cuotas ya están incluidas (no duplicar)
   const feeML = (fees?.fee_detail||[]).find(f=>f.type==='mercadolibre'||f.type==='listing')?.value;
-  const comision = feeML && feeML < 0
-    ? Math.abs(feeML)                          // fees.fee_detail → más preciso
-    : Math.abs(item.sale_fee||venta*0.14);     // fallback: sale_fee del item
+  const hasFeeDetail = feeML && feeML < 0;
+  const comision = hasFeeDetail
+    ? Math.abs(feeML)                          // fee_detail incluye comisión + cuotas + costo fijo
+    : Math.abs(item.sale_fee||venta*0.14);     // fallback: solo comisión base
 
   // ── CUOTAS ───────────────────────────────────────────────────
-  // Problema real: en órdenes de catálogo, payment.total_paid_amount
-  // puede diferir de payment.transaction_amount por descuentos que ML
-  // le da al comprador, NO por cuotas reales.
-  // Solo contamos cuotas si la orden tiene tag 'financing_fee',
-  // que es el tag que ML usa cuando HAY costo real de financiación.
+  // Si tenemos fees.fee_detail, las cuotas YA están incluidas en la comisión
+  // Solo calcular cuotas por separado como fallback cuando NO hay fee_detail
   const hasFinancing = tags.includes('financing_fee');
-  const cuotas = hasFinancing
-    ? (order.payments||[]).reduce((s,p)=>{
-        const pagado=Math.abs(p.total_paid_amount||0);
-        const base=Math.abs(p.transaction_amount||0);
-        return (pagado>0&&base>0)?s+Math.max(0,pagado-base):s;
-      },0)
-    : 0;
-
+  const cuotas = hasFeeDetail ? 0 : (order.payments||[]).reduce((s,p)=>{
+    const pagado=Math.abs(p.total_paid_amount||0);
+    const base=Math.abs(p.transaction_amount||0);
+    const installments=p.installments||1;
+    const diff=pagado>0&&base>0?Math.max(0,pagado-base):0;
+    if(hasFinancing&&diff>0) return s+diff;
+    // installments>1 + diferencia plausible (hasta 50% del precio = cuotas normales)
+    if(installments>1&&diff>0&&diff<base*0.5) return s+diff;
+    return s;
+  },0);
   const costo = prod ? prod.ars*(item.quantity||1) : 0; // multiplicar por unidades
   const ivaPct = prod?prod.iva/100:0.21;
   // IVA = % directo sobre el precio de venta (de arriba para abajo)
@@ -212,7 +216,7 @@ function calcular(order, ship, fees, useBonifCost=false, umbralFreeShip=33000){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'8.3',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'8.6',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
