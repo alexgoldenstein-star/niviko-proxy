@@ -161,20 +161,29 @@ function calcular(order, ship, fees, useBonifCost=false, umbralFreeShip=33000){
     : comisionFallback;      // fallback: sale_fee*qty para pack, o 14% estimado
 
   // ── CUOTAS ───────────────────────────────────────────────────
-  // Si tenemos fees.fee_detail, las cuotas YA están incluidas en la comisión
-  // Solo calcular cuotas por separado como fallback cuando NO hay fee_detail
+  // REGLA DEFINITIVA:
+  // Las cuotas son costo del VENDEDOR solo cuando ML las cobra explícitamente.
+  // Si el comprador paga en cuotas, el recargo puede ser del banco/ML al comprador,
+  // NO necesariamente un descuento al vendedor.
+  // Evidencia: Lenovo 9 cuotas → total_paid $1.173.998 pero sale_fee solo $99.999 (12.5%)
+  // ML no cobró cuotas al vendedor en ese caso.
+  // 
+  // FUENTES CONFIABLES de cuotas del vendedor:
+  // 1. hasFeeDetail=true → ya incluido en comision, cuotas=0
+  // 2. tag 'financing_fee' → ML confirma que te cobra el costo
+  // 3. Nada más → cuotas=0 (no podemos saber sin fee_detail)
   const hasFinancing = tags.includes('financing_fee');
-  const cuotas = hasFeeDetail ? 0 : (order.payments||[]).reduce((s,p)=>{
-    const pagado=Math.abs(p.total_paid_amount||0);
-    const base=Math.abs(p.transaction_amount||0);
-    const installments=p.installments||1;
-    const diff=pagado>0&&base>0?Math.max(0,pagado-base):0;
-    if(hasFinancing&&diff>0) return s+diff;
-    // installments>1 + diferencia plausible (hasta 50% del precio = cuotas normales)
-    if(installments>1&&diff>0&&diff<base*0.5) return s+diff;
-    return s;
-  },0);
-  const costo = prod ? prod.ars*(item.quantity||1) : 0; // multiplicar por unidades
+  const cuotas = hasFeeDetail ? 0
+    : hasFinancing
+      ? (order.payments||[]).reduce((s,p)=>{
+          const pagado=Math.abs(p.total_paid_amount||0);
+          const base=Math.abs(p.transaction_amount||0);
+          const diff=pagado>0&&base>0?Math.max(0,pagado-base):0;
+          return diff>0&&diff<base*0.5?s+diff:s;
+        },0)
+      : 0;
+  
+const costo = prod ? prod.ars*(item.quantity||1) : 0; // multiplicar por unidades
   const ivaPct = prod?prod.iva/100:0.21;
   // IVA = % directo sobre el precio de venta (de arriba para abajo)
   const iva = venta*ivaPct;
@@ -225,7 +234,7 @@ function calcular(order, ship, fees, useBonifCost=false, umbralFreeShip=33000){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'8.7',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'8.8',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
