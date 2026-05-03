@@ -54,9 +54,15 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
   if(modal==='Flex'){
     const cordon = getCordon(ciudad);
     const costoCordon = CORD[cordon]||CORD[3];
-    // Bonificación ML para Flex: $849 estándar
-    const bonif = 849;
-    return {costo:Math.max(0,costoCordon-bonif),bonif,cordon};
+    // El comprador paga el envío Flex → ese dinero llega a nosotros vía ML
+    // shipping_option.cost = lo que pagó el comprador (ingreso para el vendedor)
+    // CORD[cordon] = lo que nos cobra la logística Flex (egreso del vendedor)
+    // Ganancia/pérdida neta del envío = ingreso - egreso
+    const ingresoEnvio = ship?.shipping_option?.cost || ship?.lead_time?.cost || 849;
+    const gananciaEnvio = ingresoEnvio - costoCordon;
+    // costoEnvio negativo = ganancia en el envío (ingreso > costo logística)
+    // costoEnvio positivo = pérdida en el envío (costo logística > ingreso)
+    return {costo:-gananciaEnvio, bonif:ingresoEnvio, cordon, ingresoEnvio, costoCordon};
   }
   // Correo: buscar costo en orden de disponibilidad
   // 1. fees.fee_detail[shipping] — post-liquidación (más preciso)
@@ -166,14 +172,22 @@ function calcular(order, ship, fees, useBonifCost=false, umbralFreeShip=33000){
     ||order.shipping?.receiver_address?.city?.name||'';
   const estado = ship?.receiver_address?.state?.name||'';
   const modal = getModal(order,ship);
-  const {costo:costoEnvio,bonif:bonifEnvio,cordon} = getEnvio(order,ship,fees,modal,useBonifCost,{umbralFreeShip});
+  const envioData = getEnvio(order,ship,fees,modal,useBonifCost,{umbralFreeShip});
+  const {costo:costoEnvio,bonif:bonifEnvio,cordon} = envioData;
   // Retenciones impositivas que ML descuenta automáticamente:
   // Impuesto Créditos y Débitos: 0.6% fijo
   // Retención IIBB SIRTAC: 0.6% fijo
   // IIBB provinciales: ~0.025% variable según provincia (no predecible por orden)
   // Total estimado: 1.2% del precio de venta
   const retencionesML = Math.round(venta * 0.012);
-  const ganancia = venta-comision-cuotas-costo-iva-pub-iibb-costoEnvio-retencionesML;
+  // Para Flex: costoEnvio puede ser negativo cuando ingreso > costo logística
+  // En ese caso, representa una ganancia adicional por el envío
+  // La fórmula: ganancia = ingresos - costos
+  // Ingresos = venta (producto) + ingresoEnvio (si buyer pagó envío)
+  // Costos = comision + costo + iva + pub + iibb + retencionesML + costoCordon
+  const ingresoEnvioFlex = modal==='Flex' ? (envioData?.ingresoEnvio||0) : 0;
+  const costoCordonFlex = modal==='Flex' ? (envioData?.costoCordon||0) : Math.abs(costoEnvio);
+  const ganancia = (venta + ingresoEnvioFlex) - comision - cuotas - costo - iva - pub - iibb - retencionesML - costoCordonFlex;
 
   return {
     id:order.id, fecha:(order.date_created||'').split('T')[0],
@@ -183,6 +197,8 @@ function calcular(order, ship, fees, useBonifCost=false, umbralFreeShip=33000){
     costo:Math.round(costo), iva:Math.round(iva), ivaPct:prod?.iva||21,
     pub:Math.round(pub), iibb:Math.round(iibb),
     costoEnvio:Math.round(costoEnvio), bonifEnvio:Math.round(bonifEnvio||0),
+    ingresoEnvio:Math.round(envioData?.ingresoEnvio||0),
+    costoCordon:Math.round(envioData?.costoCordon||0),
     retencionesML:Math.round(retencionesML),
     ganancia:Math.round(ganancia), pct:venta>0?ganancia/venta:0,
     sinProducto:!prod,
@@ -196,7 +212,7 @@ function calcular(order, ship, fees, useBonifCost=false, umbralFreeShip=33000){
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'8.2',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'8.3',prods:PRODS.length,zones:Object.keys(ZONA).length}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
