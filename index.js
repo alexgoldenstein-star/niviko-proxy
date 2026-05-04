@@ -286,13 +286,21 @@ app.get('/orders/all',async(req,res)=>{
       const r=await fetch(ML+'/orders/search?'+p,{headers:hdr(token)});
       const data=await r.json();
       if(data.error||!data.results)break;
-      // Filtrar en cliente también por si acaso: solo órdenes realmente pagadas
+      // Filtrar: solo órdenes realmente pagadas y cobradas
       const valid=data.results.filter(o=>{
         const s=o.status||'';
         const tags=o.tags||[];
-        // Excluir canceladas, reembolsadas, inválidas
+        // Excluir por status
         if(s==='cancelled'||s==='invalid')return false;
+        // Excluir por tags
         if(tags.includes('cancelled')||tags.includes('refunded'))return false;
+        // Excluir devoluciones parciales
+        if(tags.includes('partial_refund'))return false;
+        // Excluir órdenes sin monto real
+        if((o.total_amount||0)<=0)return false;
+        // Verificar que al menos un pago esté aprobado
+        const pagos=o.payments||[];
+        if(pagos.length>0&&!pagos.some(p=>p.status==='approved'))return false;
         return true;
       });
       all=all.concat(valid);
