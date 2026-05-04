@@ -69,18 +69,25 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
     // Estimación: si ML subsidia, el ingreso ≈ costo del cordón (ML cubre el costo)
     // En la práctica ML puede pagar más o menos - usar fees post-entrega cuando disponible
     const feeShip = (fees?.fee_detail||[]).find(f=>f.type==='shipping')?.value;
-    
+
+    // loyal_discount=1 en cost_components = MercadoLider Platinum, ML cubre el envio
+    const loyalDiscount = ship?.cost_components?.loyal_discount===1;
+    // order_has_discount tag = ML aplico bonificacion (incluye envio gratis Flex)
+    const hasDiscount = flexTags.includes('order_has_discount');
+    // ML bonifica el envio al vendedor en cualquiera de estos casos
+    const mlBonificaFlex = mlSubsidiaFlex || loyalDiscount || hasDiscount;
+
     let ingresoEnvio;
     if(typeof soCost==='number' && soCost>0){
-      // Comprador pagó explícitamente
+      // Comprador pago explicitamente
       ingresoEnvio = soCost;
     } else if(typeof feeShip==='number' && feeShip>0){
-      // fees.fee_detail[shipping] positivo = ML bonificó al vendedor (post-entrega)
+      // fees.fee_detail[shipping] positivo = monto exacto que ML bonifico (fuente mas precisa)
       ingresoEnvio = feeShip;
-    } else if(mlSubsidiaFlex){
-      // ML subsidia pero no tenemos el monto exacto aún (not_delivered)
-      // Estimamos: ML suele pagar el costo del cordón + algo extra
-      // Usamos costoCordon como estimación conservadora (neto ~= 0)
+    } else if(mlBonificaFlex){
+      // ML bonifica pero fee_detail no disponible aun (not_delivered o pack_order)
+      // Estimacion conservadora: costoCordon (neto ~= 0)
+      // El monto real se vera cuando fee_detail este disponible post-liquidacion
       ingresoEnvio = costoCordon;
     } else {
       ingresoEnvio = 0;
@@ -286,21 +293,13 @@ app.get('/orders/all',async(req,res)=>{
       const r=await fetch(ML+'/orders/search?'+p,{headers:hdr(token)});
       const data=await r.json();
       if(data.error||!data.results)break;
-      // Filtrar: solo órdenes realmente pagadas y cobradas
+      // Filtrar en cliente también por si acaso: solo órdenes realmente pagadas
       const valid=data.results.filter(o=>{
         const s=o.status||'';
         const tags=o.tags||[];
-        // Excluir por status
+        // Excluir canceladas, reembolsadas, inválidas
         if(s==='cancelled'||s==='invalid')return false;
-        // Excluir por tags
         if(tags.includes('cancelled')||tags.includes('refunded'))return false;
-        // Excluir devoluciones parciales
-        if(tags.includes('partial_refund'))return false;
-        // Excluir órdenes sin monto real
-        if((o.total_amount||0)<=0)return false;
-        // Verificar que al menos un pago esté aprobado
-        const pagos=o.payments||[];
-        if(pagos.length>0&&!pagos.some(p=>p.status==='approved'))return false;
         return true;
       });
       all=all.concat(valid);
@@ -353,8 +352,9 @@ app.get('/debug/order/:id',async(req,res)=>{
       SHIP_BUYER_SHIPPING_COST:ship?.cost_components?.buyer_shipping_cost,
       SHIP_COST_RAW:ship?.cost,
       FEE_DETAIL:fees?.fee_detail,
-      FEE_DETAIL:fees?.fee_detail,
       FEE_SHIPPING:fees?.fee_detail?.find?.(f=>f.type==='shipping')?.value,
+      LOYAL_DISCOUNT:ship?.cost_components?.loyal_discount,
+      ORDER_HAS_DISCOUNT:(order.tags||[]).includes('order_has_discount'),
       PAYMENTS:order.payments?.map(p=>({
         total_paid:p.total_paid_amount,
         transaction:p.transaction_amount,
