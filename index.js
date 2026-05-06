@@ -137,11 +137,21 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
   const mlSubsidia = freeShip && venta >= umbralFreeShip;
   
   if(!freeShip){
-    // free_shipping=false → comprador paga el envío por su cuenta
-    // El toggle NO aplica aquí - el vendor no tiene costo de envío
+    // free_shipping=false: puede ser que el comprador pago solo una parte
+    // Si fee_detail[shipping] negativo → ML ya liquidó, usar ese valor exacto
     const fShipFee=(fees?.fee_detail||[]).find(f=>f.type==='shipping')?.value;
     if(typeof fShipFee==='number' && fShipFee<0)
       return {costo:Math.abs(fShipFee),bonif:0,cordon:null};
+    // Si shipping_option.cost > 0 (comprador pagó algo) y list_cost > cost
+    // → el vendedor paga la diferencia
+    const soCostVal = ship?.shipping_option?.cost;
+    const listCostVal = ship?.shipping_option?.list_cost;
+    if(typeof soCostVal==='number' && soCostVal>0 &&
+       typeof listCostVal==='number' && listCostVal>soCostVal){
+      // Comprador pagó soCost, vendedor paga la diferencia
+      return {costo:Math.round(listCostVal-soCostVal),bonif:0,cordon:null};
+    }
+    // Comprador pagó todo el envío → vendedor $0
     return {costo:0,bonif:0,cordon:null};
   }
   
