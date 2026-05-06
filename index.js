@@ -48,7 +48,20 @@ function getModal(order, ship){
 
 // ── COSTO ENVÍO ───────────────────────────────────────────────
 function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
-  if(modal==='Full') return {costo:0,bonif:0,cordon:null};
+  if(modal==='Full'){
+    // Full: ML cobra el costo de logistica al vendedor
+    // Fuente 1: fees.fee_detail[shipping] — monto exacto post-entrega (negativo)
+    // Fuente 2: shipping_option.list_cost — costo bruto pre-liquidacion
+    const feeShipFull = (fees?.fee_detail||[]).find(f=>f.type==='shipping')?.value;
+    let costoFull = 0;
+    if(typeof feeShipFull==='number' && feeShipFull<0){
+      costoFull = Math.abs(feeShipFull); // fee_detail es negativo, lo convertimos a positivo
+    } else {
+      const listCost = ship?.shipping_option?.list_cost;
+      if(typeof listCost==='number' && listCost>0) costoFull = listCost;
+    }
+    return {costo:costoFull, bonif:0, cordon:null};
+  }
   const ciudad = ship?.receiver_address?.city?.name
     ||order.shipping?.receiver_address?.city?.name||'';
   if(modal==='Flex'){
@@ -77,21 +90,26 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
     // ML bonifica el envio al vendedor en cualquiera de estos casos
     const mlBonificaFlex = mlSubsidiaFlex || loyalDiscount || hasDiscount;
 
+    // Fuentes de ingreso Flex en orden de precision:
+    // 1. fee_detail[shipping] positivo = monto exacto acreditado por ML post-liquidacion
+    // 2. soCost > 0 = el comprador pago el envio directamente
+    // 3. mlBonificaFlex = bonificacion estimada fija $850 (valor tipico productos > $33.000)
+    // 4. Sin nada = 0
     let ingresoEnvio;
-    if(typeof soCost==='number' && soCost>0){
-      // Comprador pago explicitamente
-      ingresoEnvio = soCost;
-    } else if(typeof feeShip==='number' && feeShip>0){
-      // fees.fee_detail[shipping] positivo = monto exacto que ML bonifico (fuente mas precisa)
+    if(typeof feeShip==='number' && feeShip>0){
+      // Fuente mas precisa: fee_detail post-liquidacion
       ingresoEnvio = feeShip;
+    } else if(typeof soCost==='number' && soCost>0){
+      // Comprador pago el envio directamente
+      ingresoEnvio = soCost;
     } else if(mlBonificaFlex){
-      // ML bonifica pero fee_detail no disponible aun (not_delivered o pack_order)
-      // Estimacion conservadora: costoCordon (neto ~= 0)
-      // El monto real se vera cuando fee_detail este disponible post-liquidacion
-      ingresoEnvio = costoCordon;
+      // ML bonifica el envio — estimacion fija $850 (tipico para MercadoLider > $33.000)
+      ingresoEnvio = 850;
     } else {
+      // Sin bonificacion ni pago: vendedor absorbe el costo completo del cordon
       ingresoEnvio = 0;
     }
+    // gananciaEnvio puede ser negativa (perdida) si list_cost < costoCordon
     const gananciaEnvio = ingresoEnvio - costoCordon;
     return {costo:-gananciaEnvio, bonif:ingresoEnvio, cordon, ingresoEnvio, costoCordon};
   }
@@ -233,14 +251,22 @@ const costo = prod ? prod.ars*(item.quantity||1) : 0; // multiplicar por unidade
   // IIBB provinciales: ~0.025% variable según provincia (no predecible por orden)
   // Total estimado: 1.2% del precio de venta
   const retencionesML = Math.round(venta * 0.012);
-  // Para Flex: costoEnvio puede ser negativo cuando ingreso > costo logística
-  // En ese caso, representa una ganancia adicional por el envío
-  // La fórmula: ganancia = ingresos - costos
-  // Ingresos = venta (producto) + ingresoEnvio (si buyer pagó envío)
-  // Costos = comision + costo + iva + pub + iibb + retencionesML + costoCordon
-  const ingresoEnvioFlex = modal==='Flex' ? (envioData?.ingresoEnvio||0) : 0;
-  const costoCordonFlex = modal==='Flex' ? (envioData?.costoCordon||0) : Math.abs(costoEnvio);
-  const ganancia = (venta + ingresoEnvioFlex) - comision - cuotas - costo - iva - pub - iibb - retencionesML - costoCordonFlex;
+  // Fórmula de ganancia:
+  // Para Flex: ML ya liquidó comisión, impuestos y bonificación de envío en total_paid.
+  //   ganancia = total_paid - costoCordon - costo - iva - pub - iibb - retencionesML
+  //   total_paid = lo que ML efectivamente te acredita (ya descontó comisión + bonificó envío)
+  // Para Full/Correo: usamos venta - comision - costoEnvio (no hay total_paid limpio)
+  const totalPaid = (order.payments||[]).reduce((s,p)=>s+(p.total_paid_amount||0),0);
+  const costoCordonFlex = modal==='Flex' ? (envioData?.costoCordon||0) : 0;
+  let ganancia;
+  if(modal==='Flex' && totalPaid > 0){
+    // total_paid ya incluye: venta - comision ML - bonif envio ML - impuestos ML
+    // Solo falta descontar: logística (cordón) + costos propios
+    ganancia = totalPaid - comision - cuotas - costoCordonFlex - costo - iva - pub - iibb - retencionesML;
+  } else {
+    // Full y Correo: fórmula estándar
+    ganancia = venta - comision - cuotas - costo - iva - pub - iibb - retencionesML - Math.abs(costoEnvio);
+  }
 
   return {
     id:order.id, fecha:(order.date_created||'').split('T')[0],
