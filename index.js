@@ -49,18 +49,22 @@ function getModal(order, ship){
 // ── COSTO ENVÍO ───────────────────────────────────────────────
 function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
   if(modal==='Full'){
-    // Full: ML cobra el costo de logistica al vendedor
-    // Fuente 1: fees.fee_detail[shipping] — monto exacto post-entrega (negativo)
-    // Fuente 2: shipping_option.list_cost — costo bruto pre-liquidacion
+    // Full: verificar primero si el comprador pagó el envío
+    // Si total_paid > transaction, la diferencia es el envío pagado por el comprador
+    const totalPaid = (order.payments||[]).reduce((s,p)=>s+(p.total_paid_amount||0),0);
+    const transaction = (order.payments||[]).reduce((s,p)=>s+(p.transaction_amount||0),0);
+    const compradorPagoEnvio = totalPaid > transaction + 100; // margen de $100 para diferencias de redondeo
+    if(compradorPagoEnvio) return {costo:0, bonif:0, cordon:null};
+    // Comprador NO pagó envío → ML cobra al vendedor
+    // Fuente 1: fees.fee_detail[shipping] negativo = monto exacto post-liquidacion
     const feeShipFull = (fees?.fee_detail||[]).find(f=>f.type==='shipping')?.value;
-    let costoFull = 0;
-    if(typeof feeShipFull==='number' && feeShipFull<0){
-      costoFull = Math.abs(feeShipFull); // fee_detail es negativo, lo convertimos a positivo
-    } else {
-      const listCost = ship?.shipping_option?.list_cost;
-      if(typeof listCost==='number' && listCost>0) costoFull = listCost;
-    }
-    return {costo:costoFull, bonif:0, cordon:null};
+    if(typeof feeShipFull==='number' && feeShipFull<0)
+      return {costo:Math.abs(feeShipFull), bonif:0, cordon:null};
+    // Fuente 2: list_cost pre-liquidacion
+    const listCost = ship?.shipping_option?.list_cost;
+    if(typeof listCost==='number' && listCost>0)
+      return {costo:listCost, bonif:0, cordon:null};
+    return {costo:0, bonif:0, cordon:null};
   }
   const ciudad = ship?.receiver_address?.city?.name
     ||order.shipping?.receiver_address?.city?.name||'';
