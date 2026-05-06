@@ -49,14 +49,18 @@ function getModal(order, ship){
 // ── COSTO ENVÍO ───────────────────────────────────────────────
 function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
   if(modal==='Full'){
-    // Full: verificar primero si el comprador pagó el envío
-    // Si total_paid > transaction, la diferencia es el envío pagado por el comprador
+    const venta = order.total_amount||0;
+    const umbral = cfg?.umbralFreeShip||33000;
+    // Producto < umbral: comprador paga el envío directamente → vendedor $0
+    if(venta < umbral) return {costo:0, bonif:0, cordon:null};
+    // Producto >= umbral: ML dice "gratis" al comprador → vendedor paga el costo
+    // Verificar igual si total_paid > transaction (comprador pagó por alguna razón)
     const totalPaid = (order.payments||[]).reduce((s,p)=>s+(p.total_paid_amount||0),0);
     const transaction = (order.payments||[]).reduce((s,p)=>s+(p.transaction_amount||0),0);
-    const compradorPagoEnvio = totalPaid > transaction + 100; // margen de $100 para diferencias de redondeo
+    const compradorPagoEnvio = totalPaid > transaction + 100;
     if(compradorPagoEnvio) return {costo:0, bonif:0, cordon:null};
-    // Comprador NO pagó envío → ML cobra al vendedor
-    // Fuente 1: fees.fee_detail[shipping] negativo = monto exacto post-liquidacion
+    // Vendedor paga el envío:
+    // Fuente 1: fee_detail[shipping] negativo = monto exacto post-liquidacion
     const feeShipFull = (fees?.fee_detail||[]).find(f=>f.type==='shipping')?.value;
     if(typeof feeShipFull==='number' && feeShipFull<0)
       return {costo:Math.abs(feeShipFull), bonif:0, cordon:null};
@@ -94,24 +98,22 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
     // ML bonifica el envio al vendedor en cualquiera de estos casos
     const mlBonificaFlex = mlSubsidiaFlex || loyalDiscount || hasDiscount;
 
-    // Fuentes de ingreso Flex en orden de precision:
-    // 1. fee_detail[shipping] positivo = monto exacto acreditado por ML post-liquidacion
-    // 2. soCost > 0 = el comprador pago el envio directamente
-    // 3. mlBonificaFlex = bonificacion estimada fija $850 (valor tipico productos > $33.000)
-    // 4. Sin nada = 0
+    // Lógica de ingreso Flex según umbral de envío gratis:
+    const ventaFlex = order.total_amount||0;
+    const umbralFlex = cfg?.umbralFreeShip||33000;
+    const sobrePUmbral = ventaFlex >= umbralFlex;
     let ingresoEnvio;
     if(typeof feeShip==='number' && feeShip>0){
-      // Fuente mas precisa: fee_detail post-liquidacion
+      // Fuente más precisa: fee_detail post-liquidacion (aplica a cualquier caso)
       ingresoEnvio = feeShip;
-    } else if(typeof soCost==='number' && soCost>0){
-      // Comprador pago el envio directamente
-      ingresoEnvio = soCost;
-    } else if(mlBonificaFlex){
-      // ML bonifica el envio — estimacion fija $850 (tipico para MercadoLider > $33.000)
-      ingresoEnvio = 850;
+    } else if(sobrePUmbral){
+      // Producto >= umbral: ML dice "gratis" al comprador y bonifica ~$900 al vendedor
+      // Estimación fija $900 hasta tener fee_detail exacto
+      ingresoEnvio = 900;
     } else {
-      // Sin bonificacion ni pago: vendedor absorbe el costo completo del cordon
-      ingresoEnvio = 0;
+      // Producto < umbral: ML le cobra el envío al comprador
+      // El ingreso para el vendedor es lo que pagó el comprador (soCost)
+      ingresoEnvio = (typeof soCost==='number' && soCost>0) ? soCost : 0;
     }
     // gananciaEnvio puede ser negativa (perdida) si list_cost < costoCordon
     const gananciaEnvio = ingresoEnvio - costoCordon;
@@ -133,12 +135,12 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
   const freeShip = ship?.free_shipping===true || order.shipping?.free_shipping===true;
   const tags = order.tags||[];
   
-  // Umbral ML para envío gratis: productos >= umbral → ML subsidia
-  // Productos < umbral → comprador paga envío → vendedor $0
-  // El toggle (useBonifCost) solo aplica cuando ML subsidia (>=umbral)
   const umbralFreeShip = cfg?.umbralFreeShip || 33000;
   const venta = order.total_amount||0;
   const mlSubsidia = freeShip && venta >= umbralFreeShip;
+
+  // Producto < umbral: comprador paga el envío → vendedor $0 siempre
+  if(venta < umbralFreeShip) return {costo:0, bonif:0, cordon:null};
   
   // Datos de envío disponibles
   const soCostVal = ship?.shipping_option?.cost;    // lo que pagó el comprador
