@@ -98,21 +98,28 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
     // ML bonifica el envio al vendedor en cualquiera de estos casos
     const mlBonificaFlex = mlSubsidiaFlex || loyalDiscount || hasDiscount;
 
-    // Lógica de ingreso Flex según umbral de envío gratis:
+    // Lógica de ingreso Flex:
     const ventaFlex = order.total_amount||0;
     const umbralFlex = cfg?.umbralFreeShip||33000;
-    const sobrePUmbral = ventaFlex >= umbralFlex;
+    const sobreUmbral = ventaFlex >= umbralFlex;
+    // loyal_discount=1: ML cubre el envío completo (MercadoLíder Platinum)
+    // En este caso ni el comprador ni el vendedor pagan — costo neto = 0
+    const loyalCoversFull = ship?.cost_components?.loyal_discount===1
+      && (typeof soCost!=='number' || soCost===0)
+      && (!ship?.shipping_option?.list_cost);
     let ingresoEnvio;
     if(typeof feeShip==='number' && feeShip>0){
-      // Fuente más precisa: fee_detail post-liquidacion (aplica a cualquier caso)
+      // Fuente más precisa: fee_detail post-liquidacion
       ingresoEnvio = feeShip;
-    } else if(sobrePUmbral){
-      // Producto >= umbral: ML dice "gratis" al comprador y bonifica ~$900 al vendedor
-      // Estimación fija $900 hasta tener fee_detail exacto
+    } else if(loyalCoversFull){
+      // ML absorbe todo por loyal_discount — vendedor $0, usamos costoCordon como ingreso
+      // para que gananciaEnvio = 0 (ni ganancia ni pérdida)
+      ingresoEnvio = costoCordon;
+    } else if(sobreUmbral){
+      // >= umbral: ML bonifica ~$900 al vendedor
       ingresoEnvio = 900;
     } else {
-      // Producto < umbral: ML le cobra el envío al comprador
-      // El ingreso para el vendedor es lo que pagó el comprador (soCost)
+      // < umbral: ingreso = lo que pagó el comprador
       ingresoEnvio = (typeof soCost==='number' && soCost>0) ? soCost : 0;
     }
     // gananciaEnvio puede ser negativa (perdida) si list_cost < costoCordon
