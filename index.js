@@ -171,12 +171,11 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
 
   if((order.tags||[]).includes('no_shipping')) return {costo:0,bonif:0,cordon:null};
 
-  // useBonifCost=true: mostrar costo bruto aunque ML bonifique
-  if(useBonifCost){
-    const listCost=ship?.shipping_option?.list_cost||ship?.lead_time?.list_cost;
-    if(typeof listCost==='number'&&listCost>0) return {costo:listCost,bonif:0,cordon:null};
-    if(typeof soCost==='number'&&soCost>0) return {costo:soCost,bonif:0,cordon:null};
-  }
+  // Fallback para not_delivered con free_shipping: usar list_cost como estimacion del costo
+  // Cubre el caso cross_docking/correo donde fee_detail aun no esta disponible
+  const listCostCorreo = ship?.shipping_option?.list_cost || ship?.lead_time?.list_cost;
+  if(typeof listCostCorreo==='number' && listCostCorreo>0 && freeShip)
+    return {costo:listCostCorreo, bonif:0, cordon:null};
 
   return {costo:0,bonif:0,cordon:null};
 }
