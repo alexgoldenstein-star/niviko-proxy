@@ -49,10 +49,12 @@ function getModal(order, ship){
 // ── COSTO ENVÍO ───────────────────────────────────────────────
 function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
   if(modal==='Full'){
-    const venta = order.total_amount||0;
+    const ventaTotal = order.total_amount||0;
+    const qtyFull = order.order_items?.[0]?.quantity || 1;
+    const precioUnit = ventaTotal / qtyFull;
     const umbral = cfg?.umbralFreeShip||33000;
-    // Producto < umbral: comprador paga el envío directamente → vendedor $0
-    if(venta < umbral) return {costo:0, bonif:0, cordon:null};
+    // Precio unitario < umbral: comprador paga el envío → vendedor $0
+    if(precioUnit < umbral) return {costo:0, bonif:0, cordon:null};
     // Producto >= umbral: ML dice "gratis" al comprador → vendedor paga el costo
     // Verificar igual si total_paid > transaction (comprador pagó por alguna razón)
     const totalPaid = (order.payments||[]).reduce((s,p)=>s+(p.total_paid_amount||0),0);
@@ -99,22 +101,30 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
     const mlBonificaFlex = mlSubsidiaFlex || loyalDiscount || hasDiscount;
 
     // Lógica de ingreso Flex — siempre: gananciaEnvio = ingresoEnvio - costoCordon
-    // ingresoEnvio depende del precio vs umbral:
-    //   >= $33k: ML bonifica ~$900 al vendedor (cliente no paga envío)
-    //   <  $33k: ML le cobra al cliente, ese monto es el ingreso del vendedor (soCost)
-    const ventaFlex = order.total_amount||0;
+    // El umbral se aplica al precio UNITARIO, no al total de la orden
+    // loyal_discount=1 (MercadoLíder Platinum): ML bonifica $8.490 sin importar precio
+    const ventaTotal = order.total_amount||0;
+    const qty = order.order_items?.[0]?.quantity || 1;
+    const precioUnitario = ventaTotal / qty;
     const umbralFlex = cfg?.umbralFreeShip||33000;
-    const sobreUmbral = ventaFlex >= umbralFlex;
+    const sobreUmbral = precioUnitario >= umbralFlex;
+    // Bonificaciones Flex — configurables en Config (con defaults oficiales ML)
+    const BONIF_BAJO  = {1: cfg?.bonif_bajo_c1||4490, 2: cfg?.bonif_bajo_c2||6490, 3: cfg?.bonif_bajo_c3||8490};
+    const BONIF_ALTO  = {1: cfg?.bonif_alto_c1||449,  2: cfg?.bonif_alto_c2||649,  3: cfg?.bonif_alto_c3||849};
+    const bonifTable  = sobreUmbral ? BONIF_ALTO : BONIF_BAJO;
+    const bonifEstimada = bonifTable[cordon] || bonifTable[3]; // default cordón 3
     let ingresoEnvio;
     if(typeof feeShip==='number' && feeShip>0){
       // Fuente más precisa: fee_detail post-entrega (monto exacto de ML)
       ingresoEnvio = feeShip;
     } else if(sobreUmbral){
-      // >= umbral: bonificación ML estimada $900
-      ingresoEnvio = 900;
+      // Precio unit >= $33k: ML bonifica según cordón (C1=$449, C2=$649, C3=$849)
+      ingresoEnvio = bonifEstimada;
     } else {
-      // < umbral: lo que pagó el comprador
-      ingresoEnvio = (typeof soCost==='number' && soCost>0) ? soCost : 0;
+      // Precio unit < $33k: ML le cobra el envío al comprador y te bonifica según cordón
+      // Si hay soCost (comprador pagó), ese es el ingreso real
+      // Si no, usamos la tabla de bonificaciones como estimación
+      ingresoEnvio = (typeof soCost==='number' && soCost>0) ? soCost : bonifEstimada;
     }
     // gananciaEnvio puede ser negativa (perdida) si list_cost < costoCordon
     const gananciaEnvio = ingresoEnvio - costoCordon;
@@ -137,11 +147,13 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
   const tags = order.tags||[];
   
   const umbralFreeShip = cfg?.umbralFreeShip || 33000;
-  const venta = order.total_amount||0;
-  const mlSubsidia = freeShip && venta >= umbralFreeShip;
+  const ventaTotalC = order.total_amount||0;
+  const qtyCorreo = order.order_items?.[0]?.quantity || 1;
+  const precioUnitCorreo = ventaTotalC / qtyCorreo;
+  const mlSubsidia = freeShip && precioUnitCorreo >= umbralFreeShip;
 
-  // Producto < umbral: comprador paga el envío → vendedor $0 siempre
-  if(venta < umbralFreeShip) return {costo:0, bonif:0, cordon:null};
+  // Precio unitario < umbral: comprador paga el envío → vendedor $0 siempre
+  if(precioUnitCorreo < umbralFreeShip) return {costo:0, bonif:0, cordon:null};
   
   // Datos de envío disponibles
   const soCostVal = ship?.shipping_option?.cost;    // lo que pagó el comprador
