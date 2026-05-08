@@ -3,7 +3,8 @@ const cors=require('cors');
 const fetch=require('node-fetch');
 const app=express();
 app.use(cors({origin:'*'}));
-app.use(express.json());
+app.use(express.json({limit:'20mb'}));
+app.use(express.urlencoded({extended:true,limit:'20mb'}));
 app.use(express.urlencoded({extended:true}));
 app.use((_,res,next)=>{res.set('Cache-Control','no-store');next();});
 
@@ -845,6 +846,49 @@ Respondé SOLO con JSON válido:
 
 
 // ── OCR DE FACTURA (Claude Vision) ────────────────────────────────────────────
+// ── ITEMS (para conversión) ───────────────────────────────────────────────────
+app.get('/plataforma/items',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token)return res.status(401).json({error:'Token requerido'});
+  const{seller_id,limit=50}=req.query;
+  try{
+    const r=await fetch(`${ML}/users/${seller_id}/items/search?status=active&limit=${limit}`,{headers:hdr(token)}).then(r=>r.json());
+    const rawIds=(r.results||r.items||[]);
+    const ids=rawIds.map(x=>typeof x==='string'?x:(x.id||x)).filter(Boolean);
+    if(!ids.length)return res.json({items:[],total:0});
+    const chunks=[];for(let i=0;i<ids.length;i+=20)chunks.push(ids.slice(i,i+20));
+    const items=[];
+    for(const chunk of chunks){
+      const det=await fetch(`${ML}/items?ids=${chunk.join(',')}&attributes=id,title,price,seller_sku,status`,{headers:hdr(token)}).then(r=>r.json());
+      const arr=Array.isArray(det)?det:(det.results||[]);
+      arr.forEach(d=>{
+        const it=(d.code===200&&d.body)?d.body:d;
+        if(!it?.id)return;
+        items.push({id:it.id,title:it.title,price:it.price,seller_sku:it.seller_sku,status:it.status});
+      });
+    }
+    res.json({items,total:items.length});
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+// ── VISITAS POR ITEM ─────────────────────────────────────────────────────────
+app.get('/plataforma/visitas',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token)return res.status(401).json({error:'Token requerido'});
+  const{item_id,date_from,date_to}=req.query;
+  if(!item_id)return res.status(400).json({error:'item_id requerido'});
+  try{
+    // ML endpoint: /items/{id}/visits/time_window
+    const url=`${ML}/items/${item_id}/visits/time_window?last=30&unit=day&ending=${date_to||new Date().toISOString().split('T')[0]}`;
+    const r=await fetch(url,{headers:hdr(token)});
+    if(!r.ok)return res.json({total_visits:0,error:`ML ${r.status}`});
+    const d=await r.json();
+    // Sum all visits in the time window
+    const total=(d.results||[]).reduce((s,x)=>s+(x.total||x.visits||0),0);
+    res.json({total_visits:total||d.total||0,raw:d.results?.slice(0,3)});
+  }catch(e){res.status(500).json({error:e.message,total_visits:0});}
+});
+
 app.post('/ai/ocr-factura', async(req,res)=>{
   try{
     const {image_base64, media_type} = req.body;
