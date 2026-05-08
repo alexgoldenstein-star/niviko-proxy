@@ -845,7 +845,67 @@ Respondé SOLO con JSON válido:
 
 
 // ── OCR DE FACTURA (Claude Vision) ────────────────────────────────────────────
-app.post('/ai/ocr-factura', async(req,res)=>{\n  try{\n    const {image_base64, media_type} = req.body;\n    if(!image_base64) return res.status(400).json({error:'image_base64 requerido'});\n\n    // Claude Vision solo acepta imágenes, no PDFs directamente\n    // Si es PDF, usar el endpoint con documents beta\n    const isPDF = media_type === 'application/pdf';\n\n    const prompt = `Analizá esta factura/remito/pedido mayorista y extraé TODOS los datos en JSON.\nDevolvé SOLO el JSON sin markdown ni texto extra.\nEstructura:\n{\n  "cliente": "nombre del cliente",\n  "nro_factura": "número de factura si hay",\n  "fecha": "YYYY-MM-DD si hay fecha, sino null",\n  "items": [\n    {\n      "codigo": "código o SKU si hay, sino null",\n      "descripcion": "descripción completa del producto",\n      "cantidad": 1,\n      "precio_unitario_siva": 0,\n      "descuento_pct": 0,\n      "iva_pct": 21,\n      "precio_total_siva": 0\n    }\n  ],\n  "total_siva": 0,\n  "total_iva": 0,\n  "total_civa": 0,\n  "forma_pago": "CONTADO/FINANCIADO/30-60-90/OTRO",\n  "notas": "cualquier observacion relevante o null"\n}\nPrecios en ARS. Extraé todos los items aunque sean muchos. Si un campo no existe ponelo null o 0.`;\n\n    // Construir content según tipo de archivo\n    let content;\n    if(isPDF){\n      content = [\n        {type:'document', source:{type:'base64', media_type:'application/pdf', data:image_base64}},\n        {type:'text', text:prompt}\n      ];\n    } else {\n      content = [\n        {type:'image', source:{type:'base64', media_type:media_type||'image/jpeg', data:image_base64}},\n        {type:'text', text:prompt}\n      ];\n    }\n\n    const apiKey = process.env.ANTHROPIC_API_KEY;\n    if(!apiKey) return res.status(500).json({error:'ANTHROPIC_API_KEY no configurada en el servidor'});\n\n    const headers = {\n      'Content-Type':'application/json',\n      'x-api-key': apiKey,\n      'anthropic-version':'2023-06-01'\n    };\n    // PDF requires the pdfs beta header\n    if(isPDF) headers['anthropic-beta'] = 'pdfs-2024-09-25';\n\n    const r = await fetch('https://api.anthropic.com/v1/messages',{\n      method:'POST',\n      headers,\n      body:JSON.stringify({\n        model:'claude-sonnet-4-5',\n        max_tokens:3000,\n        messages:[{role:'user', content}]\n      })\n    });\n\n    const rawData = await r.json();\n    if(!r.ok){\n      console.error('Claude API error:', JSON.stringify(rawData));\n      return res.status(r.status).json({\n        error: rawData?.error?.message || 'Claude API error',\n        type: rawData?.error?.type,\n        status: r.status\n      });\n    }\n\n    const text = rawData.content?.[0]?.text||'';\n    let parsed;\n    try{ parsed = JSON.parse(text.replace(/```json|```/g,'').trim()); }\n    catch(e){ return res.status(422).json({error:'No se pudo parsear respuesta', raw:text.substring(0,300)}); }\n    res.json({ok:true, data:parsed});\n  } catch(e){\n    console.error('OCR error:',e);\n    res.status(500).json({error:e.message});\n  }\n});
+app.post('/ai/ocr-factura', async(req,res)=>{
+  try{
+    const {image_base64, media_type} = req.body;
+    if(!image_base64) return res.status(400).json({error:'image_base64 requerido'});
+    const isPDF = media_type === 'application/pdf';
+    const prompt = `Analiza esta factura o remito y extrae TODOS los datos en JSON.
+Devuelve SOLO el JSON sin markdown ni texto extra.
+Estructura requerida:
+{
+  "cliente": "nombre del cliente",
+  "nro_factura": "numero de factura si hay, sino null",
+  "fecha": "YYYY-MM-DD si hay fecha, sino null",
+  "items": [
+    {
+      "codigo": "codigo o SKU si hay, sino null",
+      "descripcion": "descripcion completa del producto",
+      "cantidad": 1,
+      "precio_unitario_siva": 0,
+      "descuento_pct": 0,
+      "iva_pct": 21,
+      "precio_total_siva": 0
+    }
+  ],
+  "total_siva": 0,
+  "total_iva": 0,
+  "total_civa": 0,
+  "forma_pago": "CONTADO o FINANCIADO o 30-60-90 o OTRO",
+  "notas": null
+}
+Precios en ARS. Extraer todos los items. Si un campo no existe, null o 0.`;
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if(!apiKey) return res.status(500).json({error:'ANTHROPIC_API_KEY no configurada'});
+    const headers = {
+      'Content-Type':'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version':'2023-06-01'
+    };
+    if(isPDF) headers['anthropic-beta'] = 'pdfs-2024-09-25';
+    const msgContent = isPDF
+      ? [{type:'document',source:{type:'base64',media_type:'application/pdf',data:image_base64}},{type:'text',text:prompt}]
+      : [{type:'image',source:{type:'base64',media_type:media_type||'image/jpeg',data:image_base64}},{type:'text',text:prompt}];
+    const r = await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      headers,
+      body:JSON.stringify({model:'claude-sonnet-4-5',max_tokens:3000,messages:[{role:'user',content:msgContent}]})
+    });
+    const rawData = await r.json();
+    if(!r.ok){
+      console.error('Claude API error:', JSON.stringify(rawData));
+      return res.status(r.status).json({error: rawData?.error?.message||'Claude API error', type: rawData?.error?.type});
+    }
+    const text = rawData.content?.[0]?.text||'';
+    let parsed;
+    try{ parsed = JSON.parse(text.replace(/```json|```/g,'').trim()); }
+    catch(e){ return res.status(422).json({error:'No se pudo parsear respuesta', raw:text.substring(0,300)}); }
+    res.json({ok:true, data:parsed});
+  } catch(e){
+    console.error('OCR error:',e.message);
+    res.status(500).json({error:e.message});
+  }
+});
 
 const PORT=process.env.PORT||3000;
 app.listen(PORT,()=>console.log('NIVIKO Proxy v6.3 - Puerto '+PORT));
