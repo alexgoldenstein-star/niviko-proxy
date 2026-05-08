@@ -844,6 +844,67 @@ Respondé SOLO con JSON válido:
 });
 
 
+// ── OCR DE FACTURA (Claude Vision) ────────────────────────────────────────────
+app.post('/ai/ocr-factura', async(req,res)=>{
+  try{
+    const {image_base64, media_type} = req.body;
+    if(!image_base64) return res.status(400).json({error:'image_base64 requerido'});
+    const prompt = `Analizá esta factura/remito/pedido mayorista y extraé TODOS los datos en JSON.
+Devolvé SOLO el JSON sin markdown ni texto extra.
+Estructura:
+{
+  "cliente": "nombre del cliente",
+  "nro_factura": "número de factura si hay",
+  "fecha": "YYYY-MM-DD si hay fecha, sino null",
+  "items": [
+    {
+      "codigo": "código o SKU si hay, sino null",
+      "descripcion": "descripción completa del producto",
+      "cantidad": 1,
+      "precio_unitario_siva": 0,
+      "descuento_pct": 0,
+      "iva_pct": 21,
+      "precio_total_siva": 0
+    }
+  ],
+  "total_siva": 0,
+  "total_iva": 0,
+  "total_civa": 0,
+  "forma_pago": "CONTADO/FINANCIADO/30-60-90/OTRO",
+  "condicion_iva_cliente": "RESPONSABLE_INSCRIPTO/CONSUMIDOR_FINAL/MONOTRIBUTISTA",
+  "notas": "cualquier observación relevante o null"
+}
+Precios en ARS. Extraé todos los ítems aunque sean muchos. Si un campo no existe ponelo null o 0.`;
+
+    const r = await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'x-api-key':process.env.ANTHROPIC_API_KEY,
+        'anthropic-version':'2023-06-01'
+      },
+      body:JSON.stringify({
+        model:'claude-sonnet-4-20250514',
+        max_tokens:3000,
+        messages:[{role:'user',content:[
+          {type:'image',source:{type:'base64',media_type:media_type||'image/jpeg',data:image_base64}},
+          {type:'text',text:prompt}
+        ]}]
+      })
+    });
+    if(!r.ok) return res.status(r.status).json({error:'Claude API error',status:r.status});
+    const data = await r.json();
+    const text = data.content?.[0]?.text||'';
+    let parsed;
+    try{ parsed = JSON.parse(text.replace(/```json|```/g,'').trim()); }
+    catch(e){ return res.status(422).json({error:'No se pudo parsear respuesta',raw:text.substring(0,300)}); }
+    res.json({ok:true, data:parsed});
+  } catch(e){
+    console.error('OCR error:',e);
+    res.status(500).json({error:e.message});
+  }
+});
+
 const PORT=process.env.PORT||3000;
 app.listen(PORT,()=>console.log('NIVIKO Proxy v6.3 - Puerto '+PORT));
 module.exports=app;
