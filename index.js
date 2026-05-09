@@ -952,54 +952,75 @@ Precios en ARS. Extraer todos los items. Si un campo no existe, null o 0.`;
 });
 
 // ── MERCADOADS API ───────────────────────────────────────────────────────────
-// Obtener campañas activas y su gasto
-app.get('/ads/campanas', async(req,res)=>{
+// Endpoint de diagnóstico — prueba todos los endpoints de ads posibles
+app.get('/ads/diagnostico', async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token) return res.status(401).json({error:'Token requerido'});
-  const {seller_id} = req.query;
-  try{
-    const [campR, budgetR] = await Promise.all([
-      fetch(`${ML}/product-ads/v1/campaigns?advertising_account_id=${seller_id}&limit=50`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({})),
-      fetch(`${ML}/advertising/product-ads/v1/accounts/${seller_id}`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({})),
-    ]);
-    res.json({campanas: campR.results||campR.campaigns||[], account: budgetR, raw_camp: campR});
-  } catch(e){ res.status(500).json({error:e.message}); }
+  const {seller_id}=req.query;
+  const h=hdr(token);
+  // Probar múltiples endpoints posibles de ML Ads
+  const endpoints=[
+    `/product-ads/v1/accounts/${seller_id}`,
+    `/product-ads/v1/campaigns?advertising_account_id=${seller_id}`,
+    `/product-ads/v1/metrics/seller?seller_id=${seller_id}&date_from=2026-04-01&date_to=2026-05-08&granularity=TOTAL`,
+    `/advertising/product-ads/v1/accounts/${seller_id}`,
+    `/users/${seller_id}/product-ads`,
+  ];
+  const results={};
+  for(const ep of endpoints){
+    try{
+      const r=await fetch(ML+ep,{headers:h});
+      const body=await r.json().catch(()=>({}));
+      results[ep]={status:r.status, ok:r.ok, keys:Object.keys(body).slice(0,5)};
+    }catch(e){results[ep]={error:e.message};}
+  }
+  res.json({seller_id,results});
 });
 
-// Métricas de ads del período
+// Métricas de ads — prueba múltiples endpoints y devuelve el que funcione
 app.get('/ads/metricas', async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token) return res.status(401).json({error:'Token requerido'});
-  const {seller_id, date_from, date_to} = req.query;
-  try{
-    // ML Product Ads metrics endpoint
-    const url = `${ML}/product-ads/v1/metrics/seller?seller_id=${seller_id}&date_from=${date_from}&date_to=${date_to}&granularity=TOTAL`;
-    const r = await fetch(url, {headers:hdr(token)});
-    const data = r.ok ? await r.json() : {};
-
-    // También intentar endpoint de advertising
-    const url2 = `${ML}/advertising/product-ads/v1/seller/${seller_id}/performance?date_from=${date_from}&date_to=${date_to}`;
-    const r2 = await fetch(url2, {headers:hdr(token)}).then(x=>x.ok?x.json():{}).catch(()=>({}));
-
-    res.json({
-      metricas: data,
-      performance: r2,
-      status_metricas: r.status,
-    });
-  } catch(e){ res.status(500).json({error:e.message}); }
+  const{seller_id,date_from,date_to}=req.query;
+  const h=hdr(token);
+  // Lista de endpoints a probar en orden
+  const urls=[
+    `${ML}/product-ads/v1/metrics/seller?seller_id=${seller_id}&date_from=${date_from}&date_to=${date_to}&granularity=TOTAL`,
+    `${ML}/product-ads/v1/metrics/seller?advertising_account_id=${seller_id}&date_from=${date_from}&date_to=${date_to}`,
+    `${ML}/advertising/product-ads/v1/seller/${seller_id}/performance?date_from=${date_from}&date_to=${date_to}`,
+    `${ML}/product-ads/v2/metrics?seller_id=${seller_id}&date_from=${date_from}&date_to=${date_to}`,
+  ];
+  const tried=[];
+  for(const url of urls){
+    try{
+      const r=await fetch(url,{headers:h});
+      const body=await r.json().catch(()=>({}));
+      tried.push({url,status:r.status});
+      if(r.ok && (body.spent!==undefined||body.total_spent!==undefined||body.cost!==undefined||body.clicks!==undefined)){
+        return res.json({ok:true, source:url, metricas:body, tried});
+      }
+    }catch(e){tried.push({url,error:e.message});}
+  }
+  res.json({ok:false, metricas:{}, tried, msg:'Ningún endpoint respondió con datos válidos. Reconectá las cuentas con scope read_product_ads.'});
 });
 
-// Top items en ads con su performance
+// Top items por gasto en ads
 app.get('/ads/items', async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token) return res.status(401).json({error:'Token requerido'});
-  const {seller_id, date_from, date_to, limit=20} = req.query;
-  try{
-    const url = `${ML}/product-ads/v1/metrics/items?seller_id=${seller_id}&date_from=${date_from}&date_to=${date_to}&limit=${limit}&sort_by=spent&sort_order=desc`;
-    const r = await fetch(url, {headers:hdr(token)});
-    const data = r.ok ? await r.json() : {};
-    res.json({items: data.results||data.items||[], total: data.paging?.total||0, status: r.status, raw: data});
-  } catch(e){ res.status(500).json({error:e.message}); }
+  const{seller_id,date_from,date_to,limit=20}=req.query;
+  const h=hdr(token);
+  const urls=[
+    `${ML}/product-ads/v1/metrics/items?seller_id=${seller_id}&date_from=${date_from}&date_to=${date_to}&limit=${limit}&sort_by=spent&sort_order=desc`,
+    `${ML}/product-ads/v1/metrics/items?advertising_account_id=${seller_id}&date_from=${date_from}&date_to=${date_to}&limit=${limit}`,
+  ];
+  for(const url of urls){
+    try{
+      const r=await fetch(url,{headers:h});
+      if(r.ok){const d=await r.json();return res.json({ok:true,items:d.results||d.items||[],total:d.paging?.total||0});}
+    }catch(e){}
+  }
+  res.json({ok:false,items:[]});
 });
 
 const PORT=process.env.PORT||3000;
