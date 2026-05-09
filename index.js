@@ -951,6 +951,57 @@ Precios en ARS. Extraer todos los items. Si un campo no existe, null o 0.`;
   }
 });
 
+// ── MERCADOADS API ───────────────────────────────────────────────────────────
+// Obtener campañas activas y su gasto
+app.get('/ads/campanas', async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const {seller_id} = req.query;
+  try{
+    const [campR, budgetR] = await Promise.all([
+      fetch(`${ML}/product-ads/v1/campaigns?advertising_account_id=${seller_id}&limit=50`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({})),
+      fetch(`${ML}/advertising/product-ads/v1/accounts/${seller_id}`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({})),
+    ]);
+    res.json({campanas: campR.results||campR.campaigns||[], account: budgetR, raw_camp: campR});
+  } catch(e){ res.status(500).json({error:e.message}); }
+});
+
+// Métricas de ads del período
+app.get('/ads/metricas', async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const {seller_id, date_from, date_to} = req.query;
+  try{
+    // ML Product Ads metrics endpoint
+    const url = `${ML}/product-ads/v1/metrics/seller?seller_id=${seller_id}&date_from=${date_from}&date_to=${date_to}&granularity=TOTAL`;
+    const r = await fetch(url, {headers:hdr(token)});
+    const data = r.ok ? await r.json() : {};
+
+    // También intentar endpoint de advertising
+    const url2 = `${ML}/advertising/product-ads/v1/seller/${seller_id}/performance?date_from=${date_from}&date_to=${date_to}`;
+    const r2 = await fetch(url2, {headers:hdr(token)}).then(x=>x.ok?x.json():{}).catch(()=>({}));
+
+    res.json({
+      metricas: data,
+      performance: r2,
+      status_metricas: r.status,
+    });
+  } catch(e){ res.status(500).json({error:e.message}); }
+});
+
+// Top items en ads con su performance
+app.get('/ads/items', async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const {seller_id, date_from, date_to, limit=20} = req.query;
+  try{
+    const url = `${ML}/product-ads/v1/metrics/items?seller_id=${seller_id}&date_from=${date_from}&date_to=${date_to}&limit=${limit}&sort_by=spent&sort_order=desc`;
+    const r = await fetch(url, {headers:hdr(token)});
+    const data = r.ok ? await r.json() : {};
+    res.json({items: data.results||data.items||[], total: data.paging?.total||0, status: r.status, raw: data});
+  } catch(e){ res.status(500).json({error:e.message}); }
+});
+
 const PORT=process.env.PORT||3000;
 app.listen(PORT,()=>console.log('NIVIKO Proxy v6.3 - Puerto '+PORT));
 module.exports=app;
