@@ -951,76 +951,107 @@ Precios en ARS. Extraer todos los items. Si un campo no existe, null o 0.`;
   }
 });
 
-// ── MERCADOADS API ───────────────────────────────────────────────────────────
-// Endpoint de diagnóstico — prueba todos los endpoints de ads posibles
+// ── MERCADOADS API v2 ────────────────────────────────────────────────────────
+// Paso 1: obtener advertiser_id del seller
+app.get('/ads/advertiser', async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const {seller_id}=req.query;
+  try{
+    // Endpoint oficial para obtener advertiser_id
+    const r=await fetch(`${ML}/product-ads/v2/advertisers?user_id=${seller_id}`,{headers:hdr(token)});
+    const d=await r.json();
+    res.json({status:r.status, data:d, advertiser_id: d.results?.[0]?.advertiser_id || d.advertiser_id || null});
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+// Diagnóstico — prueba endpoints reales de ML Ads v2
 app.get('/ads/diagnostico', async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token) return res.status(401).json({error:'Token requerido'});
   const {seller_id}=req.query;
   const h=hdr(token);
-  // Probar múltiples endpoints posibles de ML Ads
   const endpoints=[
+    `/product-ads/v2/advertisers?user_id=${seller_id}`,
     `/product-ads/v1/accounts/${seller_id}`,
-    `/product-ads/v1/campaigns?advertising_account_id=${seller_id}`,
-    `/product-ads/v1/metrics/seller?seller_id=${seller_id}&date_from=2026-04-01&date_to=2026-05-08&granularity=TOTAL`,
-    `/advertising/product-ads/v1/accounts/${seller_id}`,
-    `/users/${seller_id}/product-ads`,
+    `/users/${seller_id}/advertising/account`,
   ];
   const results={};
   for(const ep of endpoints){
     try{
       const r=await fetch(ML+ep,{headers:h});
       const body=await r.json().catch(()=>({}));
-      results[ep]={status:r.status, ok:r.ok, keys:Object.keys(body).slice(0,5)};
+      results[ep]={status:r.status, ok:r.ok, preview:JSON.stringify(body).substring(0,150)};
     }catch(e){results[ep]={error:e.message};}
   }
   res.json({seller_id,results});
 });
 
-// Métricas de ads — prueba múltiples endpoints y devuelve el que funcione
+// Métricas de ads usando advertiser_id (ML Product Ads v2)
 app.get('/ads/metricas', async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token) return res.status(401).json({error:'Token requerido'});
   const{seller_id,date_from,date_to}=req.query;
   const h=hdr(token);
-  // Lista de endpoints a probar en orden
-  const urls=[
-    `${ML}/product-ads/v1/metrics/seller?seller_id=${seller_id}&date_from=${date_from}&date_to=${date_to}&granularity=TOTAL`,
-    `${ML}/product-ads/v1/metrics/seller?advertising_account_id=${seller_id}&date_from=${date_from}&date_to=${date_to}`,
-    `${ML}/advertising/product-ads/v1/seller/${seller_id}/performance?date_from=${date_from}&date_to=${date_to}`,
-    `${ML}/product-ads/v2/metrics?seller_id=${seller_id}&date_from=${date_from}&date_to=${date_to}`,
-  ];
-  const tried=[];
-  for(const url of urls){
-    try{
-      const r=await fetch(url,{headers:h});
-      const body=await r.json().catch(()=>({}));
-      tried.push({url,status:r.status});
-      if(r.ok && (body.spent!==undefined||body.total_spent!==undefined||body.cost!==undefined||body.clicks!==undefined)){
-        return res.json({ok:true, source:url, metricas:body, tried});
+  try{
+    // Primero obtener advertiser_id
+    const advR=await fetch(`${ML}/product-ads/v2/advertisers?user_id=${seller_id}`,{headers:h});
+    const advD=await advR.json();
+    const advId=advD.results?.[0]?.advertiser_id||advD.advertiser_id;
+    if(!advId) return res.json({ok:false, error:'No se encontró advertiser_id', raw:advD, status:advR.status});
+
+    // Obtener métricas del advertiser
+    const metrics='clicks,prints,ctr,cost,cpc,acos,roas,direct_amount,total_amount,direct_units_quantity,units_quantity';
+    const url=`${ML}/product-ads/v2/advertisers/${advId}/metrics?date_from=${date_from}&date_to=${date_to}&aggregation_type=total&metrics=${metrics}`;
+    const metR=await fetch(url,{headers:h});
+    const metD=await metR.json();
+    if(!metR.ok) return res.json({ok:false, error:metD, url, status:metR.status});
+
+    // Normalizar respuesta
+    const m=metD.results?.[0]||metD;
+    res.json({
+      ok:true,
+      advertiser_id:advId,
+      metricas:{
+        spent:   m.cost||m.spent||0,
+        clicks:  m.clicks||0,
+        prints:  m.prints||m.impressions||0,
+        ctr:     m.ctr||0,
+        cpc:     m.cpc||0,
+        acos:    m.acos||0,
+        roas:    m.roas||0,
+        direct_amount:  m.direct_amount||m.attributed_sales||0,
+        total_amount:   m.total_amount||m.total_sales||0,
+        direct_units:   m.direct_units_quantity||0,
+        total_units:    m.units_quantity||0,
       }
-    }catch(e){tried.push({url,error:e.message});}
-  }
-  res.json({ok:false, metricas:{}, tried, msg:'Ningún endpoint respondió con datos válidos. Reconectá las cuentas con scope read_product_ads.'});
+    });
+  }catch(e){res.status(500).json({error:e.message});}
 });
 
-// Top items por gasto en ads
+// Top items por gasto en ads (v2)
 app.get('/ads/items', async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token) return res.status(401).json({error:'Token requerido'});
   const{seller_id,date_from,date_to,limit=20}=req.query;
   const h=hdr(token);
-  const urls=[
-    `${ML}/product-ads/v1/metrics/items?seller_id=${seller_id}&date_from=${date_from}&date_to=${date_to}&limit=${limit}&sort_by=spent&sort_order=desc`,
-    `${ML}/product-ads/v1/metrics/items?advertising_account_id=${seller_id}&date_from=${date_from}&date_to=${date_to}&limit=${limit}`,
-  ];
-  for(const url of urls){
-    try{
-      const r=await fetch(url,{headers:h});
-      if(r.ok){const d=await r.json();return res.json({ok:true,items:d.results||d.items||[],total:d.paging?.total||0});}
-    }catch(e){}
-  }
-  res.json({ok:false,items:[]});
+  try{
+    // Obtener advertiser_id primero
+    const advD=await fetch(`${ML}/product-ads/v2/advertisers?user_id=${seller_id}`,{headers:h}).then(r=>r.json()).catch(()=>({}));
+    const advId=advD.results?.[0]?.advertiser_id||advD.advertiser_id;
+    if(!advId) return res.json({ok:false,items:[],error:'No advertiser_id'});
+
+    const metrics='clicks,prints,cost,cpc,acos,roas,direct_amount';
+    const url=`${ML}/product-ads/v2/advertisers/${advId}/metrics?date_from=${date_from}&date_to=${date_to}&aggregation_type=item&metrics=${metrics}&limit=${limit}&sort_by=cost&sort_order=desc`;
+    const r=await fetch(url,{headers:h});
+    const d=await r.json();
+    const items=(d.results||d.items||[]).map(i=>({
+      id:i.item_id||i.id, spent:i.cost||0, clicks:i.clicks||0,
+      prints:i.prints||0, acos:i.acos||0, roas:i.roas||0,
+      sales:i.direct_amount||0, units:i.direct_units_quantity||0,
+    }));
+    res.json({ok:true,items,total:d.paging?.total||items.length});
+  }catch(e){res.status(500).json({error:e.message,items:[]});}
 });
 
 const PORT=process.env.PORT||3000;
