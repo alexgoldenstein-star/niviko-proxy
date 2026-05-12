@@ -265,10 +265,15 @@ function calcular(order, ship, fees, useBonifCost=false, umbralFreeShip=33000){
   
 const costo = prod ? prod.ars*(item.quantity||1) : 0; // multiplicar por unidades
   const ivaPct = prod?prod.iva/100:0.21;
-  // IVA = % directo sobre el precio de venta (de arriba para abajo)
-  const iva = venta*ivaPct;
-  const pub = (prod&&prod.pub===false)?0:venta*0.05;
-  const iibb = venta*0.04;
+  // IVA CORRECTO: el precio de venta YA incluye IVA → desglozar dividiendo
+  // IVA = venta - venta/1.21  (o 1.105 para informática)
+  const iva = Math.round(venta - venta/(1+ivaPct));
+  // Precio sin IVA (base imponible)
+  const ventaSinIva = venta - iva;
+  // Publicidad: % sobre venta total (ML lo cobra sobre precio con IVA)
+  const pub = (prod&&prod.pub===false)?0:Math.round(venta*0.05);
+  // IIBB CORRECTO: se calcula sobre el precio SIN IVA
+  const iibb = Math.round(ventaSinIva*0.04);
 
   const ciudad = ship?.receiver_address?.city?.name
     ||order.shipping?.receiver_address?.city?.name||'';
@@ -949,6 +954,27 @@ Precios en ARS. Extraer todos los items. Si un campo no existe, null o 0.`;
     console.error('OCR error:',e.message);
     res.status(500).json({error:e.message});
   }
+});
+
+// ── CLAUDE AI PROXY (evita CORS desde el browser) ───────────────────────────
+app.post('/ai/chat', async(req,res)=>{
+  try{
+    const {model='claude-sonnet-4-5', max_tokens=1000, system, messages} = req.body;
+    if(!messages||!messages.length) return res.status(400).json({error:'messages requerido'});
+    const body = {model, max_tokens, messages};
+    if(system) body.system = system;
+    const r = await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY||'',
+        'anthropic-version':'2023-06-01'
+      },
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    res.status(r.status).json(d);
+  }catch(e){res.status(500).json({error:e.message});}
 });
 
 // ── MERCADOADS API v2 ────────────────────────────────────────────────────────
