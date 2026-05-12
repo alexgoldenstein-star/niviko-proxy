@@ -1117,6 +1117,6 @@ app.get('/ads/items', async(req,res)=>{
 });
 
 const PORT=process.env.PORT||3000;
-app.listen(PORT,()=>console.log('NIVIKO Proxy v6.3 - Puerto '+PORT));
+app.get('/version',(req,res)=>res.json({version:'6.4',iva_formula:'venta - venta/(1+ivaPct)',iibb_formula:'ventaSinIva * 0.04',date:'2026-05-12'}));
+app.listen(PORT,()=>console.log('NIVIKO Proxy v6.4 - Puerto '+PORT));
 module.exports=app;
- 
