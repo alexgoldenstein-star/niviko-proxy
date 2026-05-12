@@ -16,6 +16,42 @@ const PRODS=[{"sku":"15-FD0095WM","desc":"NOTEBOOK HP","usd":300.0,"ars":420000,
 
 const PIDX={};
 PRODS.forEach(p=>{if(p.sku){PIDX[p.sku]=p;PIDX[p.sku.toLowerCase()]=p;}});
+
+// ── FIREBASE — cargar edits de productos y zonas al arrancar ─────────────────
+const FIREBASE_URL='https://firestore.googleapis.com/v1/projects/niviko-app/databases/(default)/documents/ml_dashboard';
+async function loadFirebaseEdits(){
+  try{
+    // Cargar edits de productos
+    const rp=await fetch(`${FIREBASE_URL}/products`).then(r=>r.ok?r.json():{}).catch(()=>({}));
+    const editsMap=rp.fields?.edits?.mapValue?.fields||{};
+    Object.entries(editsMap).forEach(([sku,val])=>{
+      const d=val.mapValue?.fields||{};
+      const ars=parseFloat(d.ars?.doubleValue||d.ars?.integerValue||0);
+      const iva=parseFloat(d.iva?.doubleValue||d.iva?.integerValue||21);
+      if(ars>0){
+        const entry={...(PIDX[sku]||{}),sku,ars,iva};
+        PIDX[sku]=entry;
+        PIDX[sku.toLowerCase()]=entry;
+        console.log(`[firebase] prod edit: ${sku} = $${ars}`);
+      }
+    });
+    // Cargar edits de zonas
+    const rz=await fetch(`${FIREBASE_URL}/zonas`).then(r=>r.ok?r.json():{}).catch(()=>({}));
+    const zonaEdits=rz.fields?.edits?.mapValue?.fields||{};
+    Object.entries(zonaEdits).forEach(([loc,val])=>{
+      const cord=parseInt(val.integerValue||val.doubleValue||0);
+      if(cord===-1) delete ZONA[loc];
+      else if(cord>0) ZONA[loc]=cord;
+    });
+    console.log(`[firebase] ${Object.keys(editsMap).length} prod edits, ${Object.keys(zonaEdits).length} zona edits cargados`);
+  }catch(e){
+    console.warn('[firebase] No se pudieron cargar edits:', e.message);
+  }
+}
+loadFirebaseEdits();
+// Recargar cada 5 minutos
+setInterval(loadFirebaseEdits, 5*60*1000);
+
 function findProd(sku){if(!sku||sku==='—')return null;const k=String(sku).trim();return PIDX[k]||PIDX[k.toLowerCase()]||null;}
 function getCordon(ciudad){if(!ciudad)return 3;return ZONA[String(ciudad).toLowerCase().trim()]||3;}
 function hdr(t){return t?{'Authorization':'Bearer '+t}:{};}
