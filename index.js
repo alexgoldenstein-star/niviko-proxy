@@ -626,7 +626,7 @@ Respondé SOLO con un JSON válido, sin texto adicional, sin markdown:
         'anthropic-beta':'web-search-2025-03-05'
       },
       body:JSON.stringify({
-        model:'claude-sonnet-4-20250514',
+        model:'claude-sonnet-4-5',
         max_tokens:2000,
         tools:[{type:'web_search_20250305',name:'web_search'}],
         messages:[{role:'user',content:prompt}]
@@ -827,7 +827,7 @@ Respondé SOLO con JSON válido:
         'anthropic-beta':'web-search-2025-03-05'
       },
       body:JSON.stringify({
-        model:'claude-sonnet-4-20250514',
+        model:'claude-sonnet-4-5',
         max_tokens:1500,
         tools:[{type:'web_search_20250305',name:'web_search'}],
         messages:[{role:'user',content:prompt}]
@@ -873,7 +873,7 @@ Respondé SOLO con JSON válido:
         'anthropic-version':'2023-06-01'
       },
       body:JSON.stringify({
-        model:'claude-sonnet-4-20250514',
+        model:'claude-sonnet-4-5',
         max_tokens:1000,
         messages:[{role:'user',content:prompt}]
       })
@@ -1119,6 +1119,12 @@ app.get('/ads/items', async(req,res)=>{
 });
 
 const PORT=process.env.PORT||3000;
-app.get('/version',(req,res)=>res.json({version:'6.4',iva_formula:'venta - venta/(1+ivaPct)',iibb_formula:'ventaSinIva * 0.04',date:'2026-05-12'}));
+app.get('/version',(req,res)=>res.json({
+  version:'6.5',
+  iva_formula:'venta - venta/(1+ivaPct)',
+  iibb_formula:'ventaSinIva * 0.04',
+  anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
+  date:'2026-05-13'
+}));
 app.listen(PORT,()=>console.log('NIVIKO Proxy v6.4 - Puerto '+PORT));
 module.exports=app;
