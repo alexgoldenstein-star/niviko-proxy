@@ -113,6 +113,8 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
     ||order.shipping?.receiver_address?.city?.name||'';
   if(modal==='Flex'){
     const cordon = getCordon(ciudad);
+    // Costo por unidad vendida Flex: para productos >= $33k usar cordón geográfico
+    // Para < $33k: ML lo cobra incluido en comisión, no sumar aparte
     const costoCordon = CORD[cordon]||CORD[3];
     const flexTags = order.tags||[];
     // Cuánto pagó el comprador por el envío Flex
