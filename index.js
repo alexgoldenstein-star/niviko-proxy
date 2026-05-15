@@ -1118,6 +1118,81 @@ app.get('/ads/items', async(req,res)=>{
   }catch(e){res.status(500).json({error:e.message,items:[]});}
 });
 
+// ── ANÁLISIS DE MERCADO PARA PRODUCTO NUEVO ──────────────────────────────────
+app.get('/mercado/analisis_nuevo', async(req,res)=>{
+  const {query, categoria} = req.query;
+  if(!query) return res.status(400).json({error:'query requerido'});
+  try{
+    const encQ = encodeURIComponent(query);
+    const catParam = categoria ? `&category=${categoria}` : '';
+
+    // Búsqueda principal
+    const [searchR, trendR] = await Promise.all([
+      fetch(`${ML}/sites/MLA/search?q=${encQ}${catParam}&limit=50&sort=relevance`, {
+        headers:{'User-Agent':'Mozilla/5.0'}
+      }).then(r=>r.ok?r.json():{}).catch(()=>({})),
+      fetch(`${ML}/sites/MLA/search?q=${encQ}${catParam}&limit=50&sort=sold_quantity_desc`, {
+        headers:{'User-Agent':'Mozilla/5.0'}
+      }).then(r=>r.ok?r.json():{}).catch(()=>({})),
+    ]);
+
+    const items = searchR.results || [];
+    const topSold = trendR.results || [];
+
+    if(!items.length) return res.json({ok:false, msg:'Sin resultados para esa búsqueda'});
+
+    // Análisis de precios
+    const precios = items.map(i=>i.price).filter(p=>p>0).sort((a,b)=>a-b);
+    const pMin = precios[0]||0;
+    const pMax = precios[precios.length-1]||0;
+    const pMed = precios[Math.floor(precios.length/2)]||0;
+    const pProm = precios.reduce((s,p)=>s+p,0)/Math.max(1,precios.length);
+
+    // Volumen de ventas (de los top vendidos)
+    const ventas = topSold.slice(0,20).map(i=>i.sold_quantity||0);
+    const totalVentas = ventas.reduce((s,v)=>s+v,0);
+    const promVentas = ventas.length>0?Math.round(totalVentas/ventas.length):0;
+    const maxVentas = Math.max(...ventas, 0);
+
+    // Sellers únicos (competencia)
+    const sellers = [...new Set(items.map(i=>i.seller?.id).filter(Boolean))];
+
+    // Modalidades de envío predominantes
+    const conEnvioGratis = items.filter(i=>i.shipping?.free_shipping).length;
+    const pctEnvioGratis = Math.round(conEnvioGratis/Math.max(1,items.length)*100);
+
+    // Full (ML logística)
+    const conFull = items.filter(i=>i.shipping?.logistic_type==='fulfillment').length;
+    const pctFull = Math.round(conFull/Math.max(1,items.length)*100);
+
+    // Top 5 vendidos con detalle
+    const top5 = topSold.slice(0,5).map(i=>({
+      titulo: i.title,
+      precio: i.price,
+      vendidos: i.sold_quantity||0,
+      envioGratis: i.shipping?.free_shipping||false,
+      full: i.shipping?.logistic_type==='fulfillment',
+      link: i.permalink,
+      seller_id: i.seller?.id,
+    }));
+
+    // Categoría detectada
+    const categoriaDetectada = searchR.filters?.find(f=>f.id==='category')?.values?.[0]?.name || '';
+
+    res.json({
+      ok: true,
+      query,
+      totalResultados: searchR.paging?.total || items.length,
+      vendedores: sellers.length,
+      precios: { min:pMin, max:pMax, mediana:Math.round(pMed), promedio:Math.round(pProm) },
+      ventas: { promedio:promVentas, maximo:maxVentas, totalMuestra:totalVentas },
+      envio: { pctGratis:pctEnvioGratis, pctFull:pctFull },
+      categoriaDetectada,
+      top5,
+    });
+  }catch(e){ res.status(500).json({error:e.message}); }
+});
+
 const PORT=process.env.PORT||3000;
 app.get('/version',(req,res)=>res.json({
   version:'6.5',
