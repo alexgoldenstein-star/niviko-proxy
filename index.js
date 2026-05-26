@@ -744,7 +744,7 @@ app.get('/plataforma/publicaciones',async(req,res)=>{
       });
     }
     console.log('[publicaciones] Items processed:', items.length);
-    res.json({items,total:items.length,seller_id});
+    res.json({items,total:items.length,seller_id,raw:items.length===0?{itemsR:itemsR}:undefined});
   }catch(e){res.status(500).json({error:e.message});}
 });
 
@@ -754,15 +754,30 @@ app.get('/plataforma/reclamos',async(req,res)=>{
   if(!token)return res.status(401).json({error:'Token requerido'});
   const{seller_id,status='opened',limit=20}=req.query;
   try{
-    const r=await fetch(`${ML}/post-purchase/v1/claims?seller_id=${seller_id}&status=${status}&limit=${limit}`,{headers:hdr(token)});
-    const data=await r.json();
-    const claims=data.data||data.results||[];
-    // Para cada reclamo, obtener el timeline
+    // Intentar múltiples endpoints de reclamos
+    let claims=[], total=0;
+    const endpoints=[
+      `${ML}/post-purchase/v1/claims?seller_id=${seller_id}&status=${status}&limit=${limit}`,
+      `${ML}/orders/feedback/received?as_seller=${seller_id}&status=${status}&limit=${limit}`,
+    ];
+    for(const ep of endpoints){
+      try{
+        const r=await fetch(ep,{headers:hdr(token)});
+        if(!r.ok) continue;
+        const data=await r.json();
+        const found=data.data||data.results||data.claims||[];
+        if(found.length>0){
+          claims=found; total=data.paging?.total||found.length;
+          break;
+        }
+      }catch(e2){continue;}
+    }
+    // Timeline para primeros 10
     const withTimeline=await Promise.all(claims.slice(0,10).map(async c=>{
       const tR=await fetch(`${ML}/post-purchase/v1/claims/${c.id}/timeline`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({}));
       return {...c,timeline:tR.messages||tR.history||[]};
     }));
-    res.json({claims:withTimeline,total:data.paging?.total||claims.length});
+    res.json({claims:withTimeline,total});
   }catch(e){res.status(500).json({error:e.message});}
 });
 
@@ -772,23 +787,23 @@ app.get('/plataforma/descuentos',async(req,res)=>{
   if(!token)return res.status(401).json({error:'Token requerido'});
   const{seller_id}=req.query;
   try{
-    // Try multiple endpoints for promotions/deals
-    const[promoR,dealR,campaignR]=await Promise.all([
-      fetch(`${ML}/users/${seller_id}/promotions`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({})),
-      fetch(`${ML}/users/${seller_id}/deals`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({})),
-      fetch(`${ML}/campaigns?seller_id=${seller_id}`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({})),
+    const h=hdr(token);
+    const[promoR,dealR,campaignR,dealsV2R]=await Promise.all([
+      fetch(`${ML}/users/${seller_id}/promotions`,{headers:h}).then(r=>r.ok?r.json():{}).catch(()=>({})),
+      fetch(`${ML}/deals/search?status=started&limit=20`,{headers:h}).then(r=>r.ok?r.json():{}).catch(()=>({})),
+      fetch(`${ML}/campaigns?seller_id=${seller_id}`,{headers:h}).then(r=>r.ok?r.json():{}).catch(()=>({})),
+      fetch(`${ML}/users/${seller_id}/deals?status=started`,{headers:h}).then(r=>r.ok?r.json():{}).catch(()=>({})),
     ]);
-    // Normalize responses - ML returns different structures
     const promos=[
       ...(Array.isArray(promoR)?promoR:(promoR.results||promoR.promotions||[])),
       ...(Array.isArray(dealR)?dealR:(dealR.results||dealR.deals||[])),
       ...(Array.isArray(campaignR)?campaignR:(campaignR.results||[])),
+      ...(Array.isArray(dealsV2R)?dealsV2R:(dealsV2R.results||dealsV2R.deals||[])),
     ];
-    res.json({
-      activas:promos,
-      raw:{promoR,dealR,campaignR}, // debug
-      total:promos.length
-    });
+    // Deduplicar por id
+    const seen=new Set();
+    const unique=promos.filter(p=>{const k=p.id||p.deal_id||JSON.stringify(p);if(seen.has(k))return false;seen.add(k);return true;});
+    res.json({activas:unique,total:unique.length});
   }catch(e){res.status(500).json({error:e.message});}
 });
 
@@ -1195,7 +1210,7 @@ app.get('/mercado/analisis_nuevo', async(req,res)=>{
 
 const PORT=process.env.PORT||3000;
 app.get('/version',(req,res)=>res.json({
-  version:'6.5',
+  version:'6.6',
   iva_formula:'venta - venta/(1+ivaPct)',
   iibb_formula:'ventaSinIva * 0.04',
   anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
