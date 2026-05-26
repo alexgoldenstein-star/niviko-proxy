@@ -1030,107 +1030,201 @@ app.post('/ai/chat', async(req,res)=>{
   }catch(e){res.status(500).json({error:e.message});}
 });
 
-// ── MERCADOADS API v2 ────────────────────────────────────────────────────────
-// Paso 1: obtener advertiser_id del seller
+// ── MERCADOADS — API ACTUAL (post Feb 2026) ──────────────────────────────────
+// Documentación: https://developers.mercadolibre.com.ar/es_ar/pads-read
+// Flujo: 1) GET /advertising/advertisers?product_id=PADS → advertiser_id
+//        2) GET /advertising/MLA/advertisers/{id}/product_ads/campaigns/search?metrics_summary=true → métricas
+
+const PADS_METRICS = 'clicks,prints,ctr,cost,cpc,acos,roas,cvr,sov,direct_amount,indirect_amount,total_amount,direct_units_quantity,indirect_units_quantity,units_quantity,direct_items_quantity,indirect_items_quantity,advertising_items_quantity,organic_units_quantity,organic_units_amount,organic_items_quantity';
+
+// 1. Obtener advertiser_id(s) del usuario
 app.get('/ads/advertiser', async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token) return res.status(401).json({error:'Token requerido'});
-  const {seller_id}=req.query;
   try{
-    // Endpoint oficial para obtener advertiser_id
-    const r=await fetch(`${ML}/product-ads/v2/advertisers?user_id=${seller_id}`,{headers:hdr(token)});
+    const r=await fetch(`${ML}/advertising/advertisers?product_id=PADS`,{
+      headers:{...hdr(token),'Api-Version':'1'}
+    });
     const d=await r.json();
-    res.json({status:r.status, data:d, advertiser_id: d.results?.[0]?.advertiser_id || d.advertiser_id || null});
-  }catch(e){res.status(500).json({error:e.message});}
-});
-
-// Diagnóstico — prueba endpoints reales de ML Ads v2
-app.get('/ads/diagnostico', async(req,res)=>{
-  const token=req.headers['x-ml-token'];
-  if(!token) return res.status(401).json({error:'Token requerido'});
-  const {seller_id}=req.query;
-  const h=hdr(token);
-  const endpoints=[
-    `/product-ads/v2/advertisers?user_id=${seller_id}`,
-    `/product-ads/v1/accounts/${seller_id}`,
-    `/users/${seller_id}/advertising/account`,
-  ];
-  const results={};
-  for(const ep of endpoints){
-    try{
-      const r=await fetch(ML+ep,{headers:h});
-      const body=await r.json().catch(()=>({}));
-      results[ep]={status:r.status, ok:r.ok, preview:JSON.stringify(body).substring(0,150)};
-    }catch(e){results[ep]={error:e.message};}
-  }
-  res.json({seller_id,results});
-});
-
-// Métricas de ads usando advertiser_id (ML Product Ads v2)
-app.get('/ads/metricas', async(req,res)=>{
-  const token=req.headers['x-ml-token'];
-  if(!token) return res.status(401).json({error:'Token requerido'});
-  const{seller_id,date_from,date_to}=req.query;
-  const h=hdr(token);
-  try{
-    // Primero obtener advertiser_id
-    const advR=await fetch(`${ML}/product-ads/v2/advertisers?user_id=${seller_id}`,{headers:h});
-    const advD=await advR.json();
-    const advId=advD.results?.[0]?.advertiser_id||advD.advertiser_id;
-    if(!advId) return res.json({ok:false, error:'No se encontró advertiser_id', raw:advD, status:advR.status});
-
-    // Obtener métricas del advertiser
-    const metrics='clicks,prints,ctr,cost,cpc,acos,roas,direct_amount,total_amount,direct_units_quantity,units_quantity';
-    const url=`${ML}/product-ads/v2/advertisers/${advId}/metrics?date_from=${date_from}&date_to=${date_to}&aggregation_type=total&metrics=${metrics}`;
-    const metR=await fetch(url,{headers:h});
-    const metD=await metR.json();
-    if(!metR.ok) return res.json({ok:false, error:metD, url, status:metR.status});
-
-    // Normalizar respuesta
-    const m=metD.results?.[0]||metD;
+    if(!r.ok) return res.json({ok:false, http_status:r.status, raw:d,
+      diagnostico: r.status===404 ? 'Esta cuenta no tiene ML Product Ads activado. Ir a Mercado Libre > Mi perfil > Publicidad.'
+        : r.status===403 ? 'Token sin permisos de publicidad.'
+        : r.status===401 ? 'Token expirado.'
+        : `Error HTTP ${r.status}`
+    });
+    const advertisers = d.advertisers||[];
+    // Filtrar solo los de MLA (Argentina)
+    const mla = advertisers.filter(a=>a.site_id==='MLA');
     res.json({
-      ok:true,
-      advertiser_id:advId,
-      metricas:{
-        spent:   m.cost||m.spent||0,
-        clicks:  m.clicks||0,
-        prints:  m.prints||m.impressions||0,
-        ctr:     m.ctr||0,
-        cpc:     m.cpc||0,
-        acos:    m.acos||0,
-        roas:    m.roas||0,
-        direct_amount:  m.direct_amount||m.attributed_sales||0,
-        total_amount:   m.total_amount||m.total_sales||0,
-        direct_units:   m.direct_units_quantity||0,
-        total_units:    m.units_quantity||0,
-      }
+      ok: true,
+      advertisers: mla,
+      advertiser_id: mla[0]?.advertiser_id || null,
+      all_advertisers: advertisers
     });
   }catch(e){res.status(500).json({error:e.message});}
 });
 
-// Top items por gasto en ads (v2)
+// 2. Métricas consolidadas (metrics_summary=true sobre todas las campañas)
+app.get('/ads/metricas', async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const{date_from,date_to}=req.query;
+  if(!date_from||!date_to) return res.status(400).json({error:'date_from y date_to requeridos'});
+  try{
+    // Paso 1: obtener advertiser_id
+    const advR=await fetch(`${ML}/advertising/advertisers?product_id=PADS`,{
+      headers:{...hdr(token),'Api-Version':'1'}
+    });
+    const advD=await advR.json();
+    if(!advR.ok) return res.json({ok:false, http_status:advR.status, advertiser_id:null,
+      diagnostico: advR.status===404 ? 'Esta cuenta no tiene ML Product Ads activado.'
+        : advR.status===403 ? 'Token sin permisos de publicidad.'
+        : advR.status===401 ? 'Token expirado o inválido.'
+        : `Error HTTP ${advR.status}: ${JSON.stringify(advD).substring(0,100)}`
+    });
+    const advertisers=(advD.advertisers||[]).filter(a=>a.site_id==='MLA');
+    if(!advertisers.length) return res.json({ok:false, advertiser_id:null,
+      diagnostico:'No se encontró anunciante de MLA. Verificá que la cuenta tenga ML Ads activado para Argentina.'
+    });
+    const advId = advertisers[0].advertiser_id;
+
+    // Paso 2: métricas consolidadas con metrics_summary=true
+    const url=`${ML}/advertising/MLA/advertisers/${advId}/product_ads/campaigns/search?limit=50&offset=0&date_from=${date_from}&date_to=${date_to}&metrics=${PADS_METRICS}&metrics_summary=true`;
+    const metR=await fetch(url,{headers:{...hdr(token),'api-version':'2'}});
+    const metD=await metR.json();
+    if(!metR.ok) return res.json({ok:false, advertiser_id:advId, http_status:metR.status,
+      diagnostico:`Error al obtener métricas: HTTP ${metR.status}`,
+      raw:JSON.stringify(metD).substring(0,200)
+    });
+
+    // metrics_summary = total consolidado de todas las campañas
+    const s = metD.metrics_summary || {};
+    // Campañas individuales para desglose
+    const campanas = (metD.results||[]).map(c=>({
+      id: c.id,
+      nombre: c.name,
+      status: c.status,
+      estrategia: c.strategy,
+      presupuesto: c.budget,
+      roas_target: c.roas_target||null,
+      metricas: c.metrics||{}
+    }));
+
+    res.json({
+      ok: true,
+      advertiser_id: advId,
+      advertiser_name: advertisers[0].advertiser_name,
+      total_campanas: metD.paging?.total||0,
+      metricas:{
+        spent:        s.cost||0,
+        clicks:       s.clicks||0,
+        prints:       s.prints||0,
+        ctr:          s.ctr||0,
+        cpc:          s.cpc||0,
+        acos:         s.acos||0,
+        roas:         s.roas||0,
+        cvr:          s.cvr||0,
+        sov:          s.sov||0,
+        direct_amount:   s.direct_amount||0,
+        indirect_amount: s.indirect_amount||0,
+        total_amount:    s.total_amount||0,
+        direct_units:    s.direct_units_quantity||0,
+        indirect_units:  s.indirect_units_quantity||0,
+        units_quantity:  s.units_quantity||0,
+        organic_units:   s.organic_units_quantity||0,
+        organic_amount:  s.organic_units_amount||0,
+      },
+      campanas
+    });
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+// 3. Métricas por anuncio (item) — top N por gasto
 app.get('/ads/items', async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token) return res.status(401).json({error:'Token requerido'});
-  const{seller_id,date_from,date_to,limit=20}=req.query;
-  const h=hdr(token);
+  const{date_from,date_to,limit=20}=req.query;
   try{
-    // Obtener advertiser_id primero
-    const advD=await fetch(`${ML}/product-ads/v2/advertisers?user_id=${seller_id}`,{headers:h}).then(r=>r.json()).catch(()=>({}));
-    const advId=advD.results?.[0]?.advertiser_id||advD.advertiser_id;
-    if(!advId) return res.json({ok:false,items:[],error:'No advertiser_id'});
+    // Obtener advertiser_id
+    const advD=await fetch(`${ML}/advertising/advertisers?product_id=PADS`,{
+      headers:{...hdr(token),'Api-Version':'1'}
+    }).then(r=>r.json()).catch(()=>({}));
+    const advId=(advD.advertisers||[]).filter(a=>a.site_id==='MLA')[0]?.advertiser_id;
+    if(!advId) return res.json({ok:false,items:[],diagnostico:'Sin advertiser_id para MLA'});
 
-    const metrics='clicks,prints,cost,cpc,acos,roas,direct_amount';
-    const url=`${ML}/product-ads/v2/advertisers/${advId}/metrics?date_from=${date_from}&date_to=${date_to}&aggregation_type=item&metrics=${metrics}&limit=${limit}&sort_by=cost&sort_order=desc`;
-    const r=await fetch(url,{headers:h});
-    const d=await r.json();
-    const items=(d.results||d.items||[]).map(i=>({
-      id:i.item_id||i.id, spent:i.cost||0, clicks:i.clicks||0,
-      prints:i.prints||0, acos:i.acos||0, roas:i.roas||0,
-      sales:i.direct_amount||0, units:i.direct_units_quantity||0,
-    }));
-    res.json({ok:true,items,total:d.paging?.total||items.length});
+    // Métricas por item (aggregation_type no incluido = default campaign, pero podemos usar ads search)
+    // ML no tiene aggregation_type=item en el mismo endpoint — usamos el endpoint de anuncios por campaña
+    // Primero obtenemos las campañas activas
+    const campR=await fetch(`${ML}/advertising/MLA/advertisers/${advId}/product_ads/campaigns/search?limit=20&offset=0&date_from=${date_from}&date_to=${date_to}&metrics=cost,clicks,acos,roas,direct_amount&filters[status]=active`,
+      {headers:{...hdr(token),'api-version':'2'}}).then(r=>r.ok?r.json():{results:[]}).catch(()=>({results:[]}));
+
+    const campanas=campR.results||[];
+    const allItems=[];
+
+    // Para cada campaña, obtener sus anuncios con métricas
+    for(const camp of campanas.slice(0,5)){
+      try{
+        const adsR=await fetch(
+          `${ML}/advertising/MLA/advertisers/${advId}/product_ads/campaigns/${camp.id}/ads/search?limit=${limit}&offset=0&date_from=${date_from}&date_to=${date_to}&metrics=clicks,prints,cost,cpc,acos,roas,direct_amount,indirect_amount,total_amount,direct_units_quantity&sort_by=cost&sort_order=desc`,
+          {headers:{...hdr(token),'api-version':'2'}}
+        ).then(r=>r.ok?r.json():{results:[]}).catch(()=>({results:[]}));
+        const ads=(adsR.results||[]).map(a=>({
+          id: a.item_id||a.id,
+          titulo: a.title||a.item_id||a.id,
+          thumbnail: a.thumbnail||null,
+          campana: camp.name,
+          campana_id: camp.id,
+          spent:  a.metrics?.cost||0,
+          clicks: a.metrics?.clicks||0,
+          prints: a.metrics?.prints||0,
+          cpc:    a.metrics?.cpc||0,
+          acos:   a.metrics?.acos||0,
+          roas:   a.metrics?.roas||0,
+          sales:  a.metrics?.direct_amount||0,
+          units:  a.metrics?.direct_units_quantity||0,
+        }));
+        allItems.push(...ads);
+      }catch(e2){}
+    }
+
+    // Deduplicar por item_id y sumar si aparece en varias campañas
+    const byItem={};
+    allItems.forEach(a=>{
+      if(!byItem[a.id]) byItem[a.id]={...a};
+      else{
+        byItem[a.id].spent+=a.spent; byItem[a.id].clicks+=a.clicks;
+        byItem[a.id].sales+=a.sales; byItem[a.id].units+=a.units;
+      }
+    });
+    const items=Object.values(byItem).sort((a,b)=>b.spent-a.spent).slice(0,parseInt(limit));
+    res.json({ok:true, items, total:items.length, advertiser_id:advId});
   }catch(e){res.status(500).json({error:e.message,items:[]});}
+});
+
+// 4. Diagnóstico completo — qué devuelve ML para esta cuenta
+app.get('/ads/diagnostico', async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const results={};
+  const h={...hdr(token),'Api-Version':'1'};
+  const h2={...hdr(token),'api-version':'2'};
+  try{
+    // Test 1: advertiser lookup
+    const r1=await fetch(`${ML}/advertising/advertisers?product_id=PADS`,{headers:h});
+    const d1=await r1.json();
+    results['GET /advertising/advertisers?product_id=PADS']={status:r1.status,ok:r1.ok,preview:JSON.stringify(d1).substring(0,300)};
+
+    const advId=(d1.advertisers||[]).filter(a=>a.site_id==='MLA')[0]?.advertiser_id;
+    if(advId){
+      // Test 2: campañas
+      const today=new Date().toISOString().split('T')[0];
+      const d30=new Date(Date.now()-30*864e5).toISOString().split('T')[0];
+      const r2=await fetch(`${ML}/advertising/MLA/advertisers/${advId}/product_ads/campaigns/search?limit=3&date_from=${d30}&date_to=${today}&metrics=cost,clicks&metrics_summary=true`,{headers:h2});
+      const d2=await r2.json();
+      results[`GET /advertising/MLA/advertisers/${advId}/product_ads/campaigns/search`]={status:r2.status,ok:r2.ok,preview:JSON.stringify(d2).substring(0,400)};
+    }
+    res.json({advertiser_id:advId||null,results});
+  }catch(e){res.status(500).json({error:e.message,results});}
 });
 
 // ── ANÁLISIS DE MERCADO PARA PRODUCTO NUEVO ──────────────────────────────────
@@ -1210,7 +1304,7 @@ app.get('/mercado/analisis_nuevo', async(req,res)=>{
 
 const PORT=process.env.PORT||3000;
 app.get('/version',(req,res)=>res.json({
-  version:'6.6',
+  version:'6.8',
   iva_formula:'venta - venta/(1+ivaPct)',
   iibb_formula:'ventaSinIva * 0.04',
   anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
