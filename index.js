@@ -583,6 +583,44 @@ app.get('/zones',(req,res)=>res.json({zones:ZONA,total:Object.keys(ZONA).length}
 // ── CLAUDE AI PARA ANÁLISIS DE MERCADO ───────────────────────
 // El browser no puede llamar a api.anthropic.com directamente (CORS)
 // El proxy actúa de intermediario
+// ── CANCELADAS ──────────────────────────────────────────────────────────────
+app.get('/plataforma/canceladas',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token)return res.status(401).json({error:'Token requerido'});
+  const{seller_id,date_from,date_to,limit=50}=req.query;
+  try{
+    const h=hdr(token);
+    const from=date_from||(new Date(Date.now()-30*864e5).toISOString().split('T')[0]);
+    const to=date_to||(new Date().toISOString().split('T')[0]);
+    const r=await fetch(
+      `${ML}/orders/search?seller=${seller_id}&order.status=cancelled&order.date_created.from=${from}T00:00:00.000-03:00&order.date_created.to=${to}T23:59:59.999-03:00&sort=date_desc&limit=${limit}`,
+      {headers:h}
+    );
+    if(!r.ok) return res.json({ok:false,orders:[],status:r.status,msg:`HTTP ${r.status}`});
+    const d=await r.json();
+    const orders=(d.results||[]).map(o=>({
+      id:o.id,
+      fecha:o.date_created?.split('T')[0],
+      motivo:o.cancel_detail?.description||o.cancel_reason||'—',
+      comprador:o.buyer?.nickname||'—',
+      items:(o.order_items||[]).map(i=>({
+        id:i.item?.id, titulo:i.item?.title||'—',
+        qty:i.quantity, precio:i.unit_price,
+        sku:i.item?.seller_custom_field||i.item?.id
+      })),
+      total:o.total_amount, moneda:o.currency_id
+    }));
+    const porMotivo={};
+    orders.forEach(o=>{
+      const m=o.motivo||'sin motivo';
+      if(!porMotivo[m]) porMotivo[m]={motivo:m,cant:0,total:0};
+      porMotivo[m].cant++; porMotivo[m].total+=o.total||0;
+    });
+    res.json({ok:true,orders,total:d.paging?.total||orders.length,
+      por_motivo:Object.values(porMotivo).sort((a,b)=>b.cant-a.cant)});
+  }catch(e){res.status(500).json({error:e.message,orders:[]});}
+});
+
 app.post('/ai/market',async(req,res)=>{
   try{
     const{query,category}=req.body;
@@ -752,33 +790,50 @@ app.get('/plataforma/publicaciones',async(req,res)=>{
 app.get('/plataforma/reclamos',async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token)return res.status(401).json({error:'Token requerido'});
-  const{seller_id,status='opened',limit=20}=req.query;
+  const{seller_id,status='opened',limit=30}=req.query;
   try{
-    // Intentar múltiples endpoints de reclamos
-    let claims=[], total=0;
-    const endpoints=[
-      `${ML}/post-purchase/v1/claims?seller_id=${seller_id}&status=${status}&limit=${limit}`,
-      `${ML}/orders/feedback/received?as_seller=${seller_id}&status=${status}&limit=${limit}`,
-    ];
-    for(const ep of endpoints){
-      try{
-        const r=await fetch(ep,{headers:hdr(token)});
-        if(!r.ok) continue;
-        const data=await r.json();
-        const found=data.data||data.results||data.claims||[];
-        if(found.length>0){
-          claims=found; total=data.paging?.total||found.length;
-          break;
-        }
-      }catch(e2){continue;}
+    const h=hdr(token);
+    let claims=[], total=0, source='';
+
+    // Endpoint principal: post-purchase claims
+    const r1=await fetch(`${ML}/post-purchase/v1/claims?seller_id=${seller_id}&status=${status}&limit=${limit}&sort=date_created&offset=0`,{headers:h});
+    if(r1.ok){
+      const d=await r1.json();
+      claims=d.data||d.results||d.claims||[];
+      total=d.paging?.total||claims.length;
+      source='post-purchase/v1';
     }
-    // Timeline para primeros 10
-    const withTimeline=await Promise.all(claims.slice(0,10).map(async c=>{
-      const tR=await fetch(`${ML}/post-purchase/v1/claims/${c.id}/timeline`,{headers:hdr(token)}).then(r=>r.ok?r.json():{}).catch(()=>({}));
-      return {...c,timeline:tR.messages||tR.history||[]};
+
+    // Fallback: orders con reclamos
+    if(!claims.length){
+      const r2=await fetch(`${ML}/orders/search?seller=${seller_id}&order.status=cancelled&sort=date_desc&limit=${limit}`,{headers:h});
+      if(r2.ok){
+        const d=await r2.json();
+        const ords=d.results||[];
+        // Filtrar los que tienen mediación
+        claims=ords.filter(o=>o.tags?.includes('has_claim')||o.mediations?.length>0).map(o=>({
+          id:o.id, order_id:o.id, resource_id:o.id,
+          reason_id: o.mediations?.[0]?.reason||'order_cancelled',
+          status: o.mediations?.[0]?.status||status,
+          date_created: o.date_created,
+          _from_orders: true
+        }));
+        total=claims.length; source='orders';
+      }
+    }
+
+    // Enriquecer con timeline (solo post-purchase claims reales)
+    const withData=await Promise.all(claims.slice(0,15).map(async c=>{
+      if(c._from_orders) return c;
+      const [tR,mR]=await Promise.all([
+        fetch(`${ML}/post-purchase/v1/claims/${c.id}/timeline`,{headers:h}).then(r=>r.ok?r.json():{}).catch(()=>({})),
+        fetch(`${ML}/post-purchase/v1/claims/${c.id}`,{headers:h}).then(r=>r.ok?r.json():{}).catch(()=>({}))
+      ]);
+      return {...c,...mR, timeline:tR.messages||tR.history||[]};
     }));
-    res.json({claims:withTimeline,total});
-  }catch(e){res.status(500).json({error:e.message});}
+
+    res.json({claims:withData, total, source});
+  }catch(e){res.status(500).json({error:e.message,claims:[]});}
 });
 
 // 4. DESCUENTOS Y PROMOCIONES
@@ -788,23 +843,50 @@ app.get('/plataforma/descuentos',async(req,res)=>{
   const{seller_id}=req.query;
   try{
     const h=hdr(token);
-    const[promoR,dealR,campaignR,dealsV2R]=await Promise.all([
-      fetch(`${ML}/users/${seller_id}/promotions`,{headers:h}).then(r=>r.ok?r.json():{}).catch(()=>({})),
-      fetch(`${ML}/deals/search?status=started&limit=20`,{headers:h}).then(r=>r.ok?r.json():{}).catch(()=>({})),
-      fetch(`${ML}/campaigns?seller_id=${seller_id}`,{headers:h}).then(r=>r.ok?r.json():{}).catch(()=>({})),
-      fetch(`${ML}/users/${seller_id}/deals?status=started`,{headers:h}).then(r=>r.ok?r.json():{}).catch(()=>({})),
-    ]);
-    const promos=[
-      ...(Array.isArray(promoR)?promoR:(promoR.results||promoR.promotions||[])),
-      ...(Array.isArray(dealR)?dealR:(dealR.results||dealR.deals||[])),
-      ...(Array.isArray(campaignR)?campaignR:(campaignR.results||[])),
-      ...(Array.isArray(dealsV2R)?dealsV2R:(dealsV2R.results||dealsV2R.deals||[])),
-    ];
-    // Deduplicar por id
-    const seen=new Set();
-    const unique=promos.filter(p=>{const k=p.id||p.deal_id||JSON.stringify(p);if(seen.has(k))return false;seen.add(k);return true;});
-    res.json({activas:unique,total:unique.length});
-  }catch(e){res.status(500).json({error:e.message});}
+    const results={};
+
+    // 1. Promotions (descuentos que el seller crea)
+    const pR=await fetch(`${ML}/seller-promotions/users/${seller_id}/promotions?app_version=v2&status=active&limit=30`,{headers:h});
+    results.promotions=pR.ok?(await pR.json()):null;
+
+    // 2. Deals (ofertas del día, cyber, etc.)
+    const dR=await fetch(`${ML}/users/${seller_id}/deals?status=started`,{headers:h});
+    results.deals=dR.ok?(await dR.json()):null;
+
+    // 3. Price discounts (precios tachados)
+    const pdR=await fetch(`${ML}/users/${seller_id}/items/promotions?status=candidate,started&app_version=v2&limit=30`,{headers:h});
+    results.price_discounts=pdR.ok?(await pdR.json()):null;
+
+    // Normalizar a lista única
+    const all=[];
+    const promos=results.promotions?.results||results.promotions?.promotions||[];
+    promos.forEach(p=>all.push({
+      id:p.id, name:p.name||p.label, type:'promotion',
+      percentage:p.percentage||p.percent_off,
+      status:p.status, start_date:p.start_date, end_date:p.finish_date||p.end_date,
+      items_count:p.items_count||0
+    }));
+    const deals=results.deals?.results||results.deals?.deals||[];
+    deals.forEach(d=>all.push({
+      id:d.id, name:d.name||d.deal_print_id, type:'deal',
+      percentage:null, status:'active',
+      start_date:d.start_date, end_date:d.finish_date||d.end_date,
+      items_count:d.items_count||0
+    }));
+    const pds=results.price_discounts?.results||[];
+    pds.forEach(pd=>all.push({
+      id:pd.id, name:pd.item_id, type:'price_discount',
+      percentage:pd.percentage||pd.original_price?(Math.round((1-pd.price/pd.original_price)*100)):null,
+      status:pd.status, start_date:pd.start_date, end_date:pd.end_date,
+      items_count:1
+    }));
+
+    res.json({activas:all, total:all.length, raw_sources:{
+      promotions_status:pR.status,
+      deals_status:dR.status,
+      price_discounts_status:pdR.status
+    }});
+  }catch(e){res.status(500).json({error:e.message,activas:[]});}
 });
 
 // 5. ANÁLISIS IA DE PUBLICACIÓN
@@ -1304,7 +1386,7 @@ app.get('/mercado/analisis_nuevo', async(req,res)=>{
 
 const PORT=process.env.PORT||3000;
 app.get('/version',(req,res)=>res.json({
-  version:'6.8',
+  version:'6.9',
   iva_formula:'venta - venta/(1+ivaPct)',
   iibb_formula:'ventaSinIva * 0.04',
   anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
