@@ -941,25 +941,37 @@ Respondé SOLO con JSON válido:
 
 // 6. IA PARA RECLAMOS
 app.post('/ai/reclamo',async(req,res)=>{
-  const{tipo,descripcion,producto,dias_abierto,historial}=req.body;
+  const{tipo,descripcion,producto,dias_abierto,historial,orden_id,sku,venta,ganancia,acct}=req.body;
   try{
-    const prompt=`Sos el equipo de atención al cliente de NIVIKO, una empresa argentina que vende en MercadoLibre.
-    
-Reclamo recibido:
-- Tipo: ${tipo||'sin_especificar'}
-- Producto: ${producto}
-- Días abierto: ${dias_abierto||0}
-- Descripción del comprador: "${descripcion}"
-- Historial de mensajes: ${JSON.stringify(historial||[])}
+    const histStr=(historial||[]).map(m=>`[${m.rol||'?'}]: ${m.texto||''}`).join('\n')||'Sin mensajes previos';
+    const prompt=`Sos el equipo de atención al cliente de NIVIKO, empresa argentina importadora con MercadoLíder status.
 
-Respondé SOLO con JSON válido:
+DATOS DEL RECLAMO:
+- Tipo/Razón: ${tipo||'sin_especificar'}
+- Producto: ${producto}
+- SKU: ${sku||'—'}
+- Cuenta ML: ${acct||'—'}
+- Orden ID: ${orden_id||'—'}
+- Venta involucrada: $${venta||0} ARS
+- Ganancia en riesgo: $${ganancia||0} ARS
+- Días abierto: ${dias_abierto||0} días
+- Descripción: "${descripcion||'sin descripción'}"
+
+HISTORIAL DE MENSAJES:
+${histStr}
+
+CONTEXTO NIVIKO: Vendemos productos importados de China (sillas, tecnología, accesorios). Los tiempos de envío pueden variar según modalidad (Flex/Full/Correo Argentino). Para devoluciones, el protocolo es: 1) verificar si el producto llegó dañado o no corresponde, 2) ofrecer cambio o reembolso según el caso, 3) escalar a supervisor si el monto supera $50.000.
+
+Respondé SOLO con JSON válido sin backticks:
 {
-  "tipo_detectado": "no_llego|llegó_dañado|no_era_lo_esperado|quiere_devolver|otro",
+  "tipo_detectado": "no_llego|llego_danado|no_era_lo_esperado|quiere_devolver|demora_envio|producto_incorrecto|otro",
   "urgencia": "alta|media|baja",
-  "respuesta_sugerida": "string - respuesta completa en español, profesional y empática",
-  "acciones_recomendadas": ["string"],
+  "evaluacion": "string - 2-3 oraciones evaluando la situación real del reclamo",
+  "respuesta_sugerida": "string - respuesta completa lista para copiar y pegar, en español, profesional y empática, mencionando el producto específico",
+  "acciones_recomendadas": ["string - acción concreta"],
   "escalar": boolean,
-  "tiempo_respuesta_max": "string"
+  "tiempo_respuesta_max": "string - ej: 24hs, inmediato",
+  "riesgo_reputacion": "alto|medio|bajo"
 }`;
 
     const r=await fetch('https://api.anthropic.com/v1/messages',{
@@ -1386,7 +1398,7 @@ app.get('/mercado/analisis_nuevo', async(req,res)=>{
 
 const PORT=process.env.PORT||3000;
 app.get('/version',(req,res)=>res.json({
-  version:'6.9',
+  version:'7.0',
   iva_formula:'venta - venta/(1+ivaPct)',
   iibb_formula:'ventaSinIva * 0.04',
   anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
