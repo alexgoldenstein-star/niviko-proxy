@@ -356,6 +356,8 @@ const costo = prod ? prod.ars*(item.quantity||1) : 0; // multiplicar por unidade
     ganancia:Math.round(ganancia), pct:venta>0?ganancia/venta:0,
     sinProducto:!prod,
     sinZona:modal==='Flex'&&!ZONA[String(ciudad).toLowerCase().trim()],
+    mlItemId:item.item?.id||null,
+    mlCategoryId:item.item?.category_id||null,
     _dbg:{
       logistic_type:ship?.logistic_type||'',
       logistic_obj:ship?.logistic||null,
@@ -375,6 +377,37 @@ app.post('/auth/refresh',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'refresh_token',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
   catch(e){res.status(500).json({error:e.message});}
 });
+// ── CATEGORÍAS ML — nombre legible para un category_id ──────────────────────
+app.get('/ml/categoria/:id',async(req,res)=>{
+  try{
+    const r=await fetch(`${ML}/categories/${req.params.id}`);
+    if(!r.ok) return res.json({ok:false,name:null});
+    const d=await r.json();
+    res.json({ok:true,id:d.id,name:d.name,path:(d.path_from_root||[]).map(p=>p.name).join(' > ')});
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+// Batch: varias categorías de una vez
+app.post('/ml/categorias-batch',async(req,res)=>{
+  const{ids}=req.body;
+  if(!Array.isArray(ids)||!ids.length) return res.json({ok:false,categorias:{}});
+  try{
+    const unique=[...new Set(ids.filter(Boolean))];
+    const results={};
+    for(let i=0;i<unique.length;i+=10){
+      const batch=unique.slice(i,i+10);
+      const fetched=await Promise.all(batch.map(id=>
+        fetch(`${ML}/categories/${id}`).then(r=>r.ok?r.json():null).catch(()=>null)
+      ));
+      batch.forEach((id,idx)=>{
+        const d=fetched[idx];
+        results[id]=d?{name:d.name,path:(d.path_from_root||[]).map(p=>p.name).join(' > ')}:null;
+      });
+    }
+    res.json({ok:true,categorias:results});
+  }catch(e){res.status(500).json({error:e.message,categorias:{}});}
+});
+
 app.get('/me',async(req,res)=>{
   try{const r=await fetch(ML+'/users/me',{headers:hdr(req.headers['x-ml-token'])});res.json(await r.json());}
   catch(e){res.status(500).json({error:e.message});}
@@ -1398,7 +1431,7 @@ app.get('/mercado/analisis_nuevo', async(req,res)=>{
 
 const PORT=process.env.PORT||3000;
 app.get('/version',(req,res)=>res.json({
-  version:'7.0',
+  version:'7.3',
   iva_formula:'venta - venta/(1+ivaPct)',
   iibb_formula:'ventaSinIva * 0.04',
   anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
