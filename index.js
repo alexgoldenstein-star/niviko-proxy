@@ -1430,8 +1430,167 @@ app.get('/mercado/analisis_nuevo', async(req,res)=>{
 });
 
 const PORT=process.env.PORT||3000;
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FULLJAUS — Integrador de Marketplaces
+// Token: env FULLJAUS_TOKEN
+// ══════════════════════════════════════════════════════════════════════════════
+
+const FJ_BASE = 'https://api.fulljaus.com/v1';
+const FJ_TOKEN = process.env.FULLJAUS_TOKEN || '';
+
+function fjHdr(){ return {'X-Auth-Token': FJ_TOKEN, 'Content-Type':'application/json'}; }
+
+// Marketplaces configurados para NIVIKO
+const FJ_MARKETS = {
+  fravegasc: 'Frávega',
+  megatone:  'Megatone',
+  cetrogar:  'Cetrogar',
+  oncity:    'Oncity',
+  pardo:     'Pardo',
+  carrefour: 'Carrefour',
+  tiendabna: 'Tienda BNA',
+  credicoop: 'Tienda Credicoop',
+  bapro:     'Provincia Compras'
+};
+
+// Estados válidos (excluye NOAPRO, DEVTOT, ANUL para ventas)
+const FJ_STATUS_VENTA = 'APRO,PROC,ENV,ENT,DEVPARC';
+const FJ_STATUS_CANCEL = 'DEVTOT,ANUL,NOAPRO';
+
+// 1. Listar marketplaces activos de esta cuenta
+app.get('/fulljaus/marketplaces', async(req,res)=>{
+  try{
+    const r = await fetch(`${FJ_BASE}/marketplaces?page=1`, {headers:fjHdr()});
+    const d = await r.json();
+    if(!r.ok) return res.json({ok:false, error:d.error||`HTTP ${r.status}`});
+    const all = [];
+    for(let p=1; p<=d.pages; p++){
+      const rp = p===1 ? d : await fetch(`${FJ_BASE}/marketplaces?page=${p}`,{headers:fjHdr()}).then(x=>x.json());
+      (rp.result||[]).forEach(m=>{
+        if(m.active && FJ_MARKETS[m.codigo]){
+          all.push({codigo:m.codigo, name:m.name, shortName:m.shortName, logo:m.logoUrl});
+        }
+      });
+    }
+    res.json({ok:true, marketplaces:all, total:all.length});
+  }catch(e){res.status(500).json({ok:false, error:e.message});}
+});
+
+// 2. Traer órdenes de Fulljaus (paginado, por marketplace y fecha)
+app.get('/fulljaus/orders', async(req,res)=>{
+  const {marketplace, inicio, fin, status=FJ_STATUS_VENTA, page=1} = req.query;
+  if(!FJ_TOKEN) return res.status(500).json({ok:false, error:'FULLJAUS_TOKEN no configurado en Vercel'});
+  try{
+    let url = `${FJ_BASE}/orders?page=${page}&status=${status}`;
+    if(marketplace) url += `&marketplace=${marketplace}`;
+    if(inicio) url += `&inicio=${encodeURIComponent(inicio)}`;
+    if(fin)    url += `&fin=${encodeURIComponent(fin)}`;
+
+    const r = await fetch(url, {headers:fjHdr()});
+    const d = await r.json();
+    if(!r.ok) return res.json({ok:false, error:d.error||`HTTP ${r.status}`, url});
+
+    // Normalizar cada orden al formato NIVIKO
+    const orders = (d.result||[]).map(o => normalizeFJOrder(o));
+    res.json({ok:true, orders, total:d.count||0, pages:d.pages||0, page:parseInt(page)});
+  }catch(e){res.status(500).json({ok:false, error:e.message});}
+});
+
+// 3. Sync completo: traer TODAS las órdenes de un período (maneja paginación)
+app.get('/fulljaus/sync', async(req,res)=>{
+  const {marketplace, inicio, fin, status=FJ_STATUS_VENTA} = req.query;
+  if(!FJ_TOKEN) return res.status(500).json({ok:false, error:'FULLJAUS_TOKEN no configurado en Vercel'});
+  try{
+    // Primera página para saber cuántas hay
+    let url = `${FJ_BASE}/orders?page=1&status=${status}`;
+    if(marketplace) url += `&marketplace=${marketplace}`;
+    if(inicio) url += `&inicio=${encodeURIComponent(inicio)}`;
+    if(fin)    url += `&fin=${encodeURIComponent(fin)}`;
+
+    const r1 = await fetch(url, {headers:fjHdr()});
+    const d1 = await r1.json();
+    if(!r1.ok) return res.json({ok:false, error:d1.error||`HTTP ${r1.status}`});
+
+    const totalPages = d1.pages||1;
+    const all = [...(d1.result||[])];
+
+    // Resto de páginas
+    for(let p=2; p<=Math.min(totalPages,50); p++){
+      const rp = await fetch(url.replace('page=1',`page=${p}`), {headers:fjHdr()});
+      if(!rp.ok) break;
+      const dp = await rp.json();
+      all.push(...(dp.result||[]));
+    }
+
+    const orders = all.map(o => normalizeFJOrder(o));
+    res.json({ok:true, orders, total:d1.count||0, synced:orders.length, pages:totalPages});
+  }catch(e){res.status(500).json({ok:false, error:e.message});}
+});
+
+// 4. Detalle de una orden
+app.get('/fulljaus/order/:ref', async(req,res)=>{
+  try{
+    const r = await fetch(`${FJ_BASE}/orders/${req.params.ref}`, {headers:fjHdr()});
+    const d = await r.json();
+    if(!r.ok) return res.json({ok:false, error:d.error||`HTTP ${r.status}`});
+    res.json({ok:true, order: normalizeFJOrder(d.result||d)});
+  }catch(e){res.status(500).json({ok:false, error:e.message});}
+});
+
+// 5. Diagnóstico: verificar token y conexión
+app.get('/fulljaus/diagnostico', async(req,res)=>{
+  if(!FJ_TOKEN) return res.json({ok:false, error:'FULLJAUS_TOKEN no está configurado en Vercel Environment Variables'});
+  try{
+    const [mktR, ordR] = await Promise.all([
+      fetch(`${FJ_BASE}/marketplaces`, {headers:fjHdr()}).then(r=>r.json()).catch(e=>({error:e.message})),
+      fetch(`${FJ_BASE}/orders?page=1`, {headers:fjHdr()}).then(r=>r.json()).catch(e=>({error:e.message}))
+    ]);
+    res.json({
+      ok: !mktR.error,
+      token_configurado: !!FJ_TOKEN,
+      token_preview: FJ_TOKEN.substring(0,8)+'...',
+      marketplaces_total: mktR.count||0,
+      marketplaces_activos_niviko: (mktR.result||[]).filter(m=>m.active&&FJ_MARKETS[m.codigo]).length,
+      ordenes_count: ordR.count||0,
+      error: mktR.error||ordR.error||null
+    });
+  }catch(e){res.status(500).json({ok:false, error:e.message});}
+});
+
+// Normalizador de orden Fulljaus → formato NIVIKO
+function normalizeFJOrder(o){
+  if(!o||typeof o!=='object') return {};
+  const items = (o.items||o.orderItems||[]).map(i=>({
+    sku:          i.sku||i.product?.sku||'—',
+    desc:         i.name||i.title||i.product?.name||'—',
+    qty:          parseInt(i.quantity||i.qty||1),
+    precio_unit:  parseFloat(i.price||i.unit_price||i.unitPrice||0),
+    precio_total: parseFloat(i.total||i.subtotal||(i.price*i.quantity)||0),
+  }));
+  const primerItem = items[0]||{};
+  return {
+    id:           String(o.id||o.reference||o.externalReference||''),
+    referencia:   o.reference||o.externalReference||o.id||'',
+    marketplace:  o.marketplace||o.marketplaceCode||o.channel||'—',
+    marketplaceNombre: FJ_MARKETS[o.marketplace||o.marketplaceCode||'']||(o.marketplaceName||'—'),
+    fecha:        (o.createdAt||o.date||o.created_at||'').split('T')[0],
+    fechaISO:     o.createdAt||o.date||o.created_at||'',
+    estado:       o.status||o.state||'—',
+    sku:          primerItem.sku,
+    desc:         primerItem.desc,
+    unidades:     items.reduce((s,i)=>s+(i.qty||1),0),
+    venta:        parseFloat(o.total||o.amount||o.grandTotal||0),
+    items,
+    comprador:    o.buyer?.name||o.customer?.name||o.customerName||'—',
+    envio_info:   o.shipping||o.shippingInfo||null,
+    cuotas:       parseInt(o.installments||o.cuotas||1),
+    _raw:         o
+  };
+}
+
 app.get('/version',(req,res)=>res.json({
-  version:'7.3',
+  version:'7.4',
   iva_formula:'venta - venta/(1+ivaPct)',
   iibb_formula:'ventaSinIva * 0.04',
   anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
