@@ -1561,36 +1561,69 @@ app.get('/fulljaus/diagnostico', async(req,res)=>{
 // Normalizador de orden Fulljaus → formato NIVIKO
 function normalizeFJOrder(o){
   if(!o||typeof o!=='object') return {};
-  const items = (o.items||o.orderItems||[]).map(i=>({
-    sku:          i.sku||i.product?.sku||'—',
+
+  // La API de Fulljaus usa "products" (no "items"), con campos específicos
+  // Soporte tanto para respuesta directa como para _raw anidado
+  const rawProds = o.products||o.items||o.orderItems||[];
+  const items = rawProds.map(i=>({
+    sku:          i.sku_associated||i.sku||i.provider_code||i.product?.sku||'—',
     desc:         i.name||i.title||i.product?.name||'—',
     qty:          parseInt(i.quantity||i.qty||1),
-    precio_unit:  parseFloat(i.price||i.unit_price||i.unitPrice||0),
-    precio_total: parseFloat(i.total||i.subtotal||(i.price*i.quantity)||0),
+    precio_unit:  parseFloat(i.unit_price_with_taxes||i.unit_price||i.price||0),
+    precio_total: parseFloat((i.unit_price_with_taxes||i.unit_price||0)*(i.quantity||1)),
   }));
   const primerItem = items[0]||{};
+
+  // Marketplace: la API devuelve un objeto {code, configuration_name, ...}
+  const mktObj   = o.marketplace||{};
+  const mktCode  = typeof mktObj==='object' ? (mktObj.code||mktObj.codigo||'') : String(mktObj);
+  const mktNombre= typeof mktObj==='object'
+    ? (FJ_MARKETS[mktCode]||mktObj.configuration_name||mktObj.name||mktCode||'—')
+    : (FJ_MARKETS[mktCode]||mktCode||'—');
+
+  // Fecha: la API usa "creation_date" en formato ISO con zona horaria
+  const fechaRaw = o.creation_date||o.createdAt||o.date||o.created_at||'';
+  const fechaStr = fechaRaw.split('T')[0];
+
+  // Venta: la API usa "products_subtotal" (suma de unit_price * qty)
+  const ventaTotal = parseFloat(
+    o.products_subtotal||o.total||o.amount||o.grandTotal||
+    items.reduce((s,i)=>s+i.precio_total,0)||0
+  );
+
+  // Cuotas: viene en payments[0].card.installments
+  const cuotas = parseInt(
+    o.installments||o.cuotas||
+    (o.payments&&o.payments[0]?.payment_method?.card?.installments)||1
+  );
+
+  // Comprador
+  const comprador = o.billing_address
+    ? (o.billing_address.name+' '+(o.billing_address.surname||'')).trim()
+    : (o.buyer?.name||o.customer?.name||o.customerName||'—');
+
   return {
-    id:           String(o.id||o.reference||o.externalReference||''),
-    referencia:   o.reference||o.externalReference||o.id||'',
-    marketplace:  o.marketplace||o.marketplaceCode||o.channel||'—',
-    marketplaceNombre: FJ_MARKETS[o.marketplace||o.marketplaceCode||'']||(o.marketplaceName||'—'),
-    fecha:        (o.createdAt||o.date||o.created_at||'').split('T')[0],
-    fechaISO:     o.createdAt||o.date||o.created_at||'',
-    estado:       o.status||o.state||'—',
-    sku:          primerItem.sku,
-    desc:         primerItem.desc,
-    unidades:     items.reduce((s,i)=>s+(i.qty||1),0),
-    venta:        parseFloat(o.total||o.amount||o.grandTotal||0),
+    id:              String(o.id||o.reference||o.externalReference||''),
+    referencia:      o.reference_order||o.reference||o.externalReference||String(o.id||''),
+    marketplace:     mktCode,
+    marketplaceNombre: mktNombre,
+    fecha:           fechaStr,
+    fechaISO:        fechaRaw,
+    estado:          o.status||o.state||'—',
+    sku:             primerItem.sku,
+    desc:            primerItem.desc,
+    unidades:        items.reduce((s,i)=>s+(i.qty||1),0)||1,
+    venta:           ventaTotal,
     items,
-    comprador:    o.buyer?.name||o.customer?.name||o.customerName||'—',
-    envio_info:   o.shipping||o.shippingInfo||null,
-    cuotas:       parseInt(o.installments||o.cuotas||1),
-    _raw:         o
+    comprador,
+    envio_info:      o.shipping_info||o.shipping||o.shippingInfo||null,
+    cuotas,
+    _raw:            o
   };
 }
 
 app.get('/version',(req,res)=>res.json({
-  version:'7.4',
+  version:'9.3',
   iva_formula:'venta - venta/(1+ivaPct)',
   iibb_formula:'ventaSinIva * 0.04',
   anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
