@@ -1562,48 +1562,50 @@ app.get('/fulljaus/diagnostico', async(req,res)=>{
 function normalizeFJOrder(o){
   if(!o||typeof o!=='object') return {};
 
-  // La API de Fulljaus usa "products" (no "items"), con campos específicos
-  // Soporte tanto para respuesta directa como para _raw anidado
+  // Fulljaus API usa "products" (no "items") con campos propios
   const rawProds = o.products||o.items||o.orderItems||[];
   const items = rawProds.map(i=>({
-    sku:          i.sku_associated||i.sku||i.provider_code||i.product?.sku||'—',
-    desc:         i.name||i.title||i.product?.name||'—',
+    sku:          i.sku_associated||i.sku||i.provider_code||'—',
+    desc:         i.name||i.title||'—',
     qty:          parseInt(i.quantity||i.qty||1),
     precio_unit:  parseFloat(i.unit_price_with_taxes||i.unit_price||i.price||0),
     precio_total: parseFloat((i.unit_price_with_taxes||i.unit_price||0)*(i.quantity||1)),
   }));
   const primerItem = items[0]||{};
 
-  // Marketplace: la API devuelve un objeto {code, configuration_name, ...}
+  // marketplace es un objeto {code, configuration_name}
   const mktObj   = o.marketplace||{};
   const mktCode  = typeof mktObj==='object' ? (mktObj.code||mktObj.codigo||'') : String(mktObj);
   const mktNombre= typeof mktObj==='object'
     ? (FJ_MARKETS[mktCode]||mktObj.configuration_name||mktObj.name||mktCode||'—')
     : (FJ_MARKETS[mktCode]||mktCode||'—');
 
-  // Fecha: la API usa "creation_date" en formato ISO con zona horaria
+  // Fecha: la API usa "creation_date"
   const fechaRaw = o.creation_date||o.createdAt||o.date||o.created_at||'';
-  const fechaStr = fechaRaw.split('T')[0];
+  const fechaStr = fechaRaw ? fechaRaw.split('T')[0] : '';
 
-  // Venta: la API usa "products_subtotal" (suma de unit_price * qty)
+  // Venta: "products_subtotal"
   const ventaTotal = parseFloat(
     o.products_subtotal||o.total||o.amount||o.grandTotal||
     items.reduce((s,i)=>s+i.precio_total,0)||0
   );
 
-  // Cuotas: viene en payments[0].card.installments
+  // Cuotas: viene en payments[0].payment_method.card.installments
   const cuotas = parseInt(
     o.installments||o.cuotas||
     (o.payments&&o.payments[0]?.payment_method?.card?.installments)||1
   );
 
   // Comprador
-  const comprador = o.billing_address
-    ? (o.billing_address.name+' '+(o.billing_address.surname||'')).trim()
+  const ba = o.billing_address||{};
+  const comprador = ba.name ? (ba.name+' '+(ba.surname||'')).trim()
     : (o.buyer?.name||o.customer?.name||o.customerName||'—');
 
+  // Envío: shipping_info[0]
+  const envio_info = (o.shipping_info&&o.shipping_info[0])||o.shipping||null;
+
   return {
-    id:              String(o.id||o.reference||o.externalReference||''),
+    id:              String(o.id||''),
     referencia:      o.reference_order||o.reference||o.externalReference||String(o.id||''),
     marketplace:     mktCode,
     marketplaceNombre: mktNombre,
@@ -1616,7 +1618,7 @@ function normalizeFJOrder(o){
     venta:           ventaTotal,
     items,
     comprador,
-    envio_info:      o.shipping_info||o.shipping||o.shippingInfo||null,
+    envio_info,
     cuotas,
     _raw:            o
   };
