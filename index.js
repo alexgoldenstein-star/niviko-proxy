@@ -103,10 +103,14 @@ function getEnvio(order, ship, fees, modal, useBonifCost=false, cfg={}){
     const feeShipFull = (fees?.fee_detail||[]).find(f=>f.type==='shipping')?.value;
     if(typeof feeShipFull==='number' && feeShipFull<0)
       return {costo:Math.abs(feeShipFull), bonif:0, cordon:null};
-    // Fuente 2: list_cost pre-liquidacion
+    // Fuente 2: list_cost pre-liquidacion (neto = list_cost - lo que paga el comprador)
     const listCost = ship?.shipping_option?.list_cost;
-    if(typeof listCost==='number' && listCost>0)
-      return {costo:listCost, bonif:0, cordon:null};
+    const soCostFull = ship?.shipping_option?.cost || 0; // lo que paga el comprador
+    if(typeof listCost==='number' && listCost>0){
+      // Costo neto para el vendedor = costo total - aporte del comprador
+      const costoNeto = Math.max(0, listCost - soCostFull);
+      return {costo:costoNeto, bonif:soCostFull, cordon:null};
+    }
     return {costo:0, bonif:0, cordon:null};
   }
   const ciudad = ship?.receiver_address?.city?.name
