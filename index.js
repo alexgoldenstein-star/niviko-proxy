@@ -349,7 +349,7 @@ const costo = prod ? prod.ars*(item.quantity||1) : 0; // multiplicar por unidade
   return {
     id:order.id, fecha:(order.date_created||'').split('T')[0],
     sku:sku||'—', desc:item.item?.title||'—', unidades:item.quantity||1,
-    ciudad, estado, modal, cordon, venta,
+    ciudad, estado, estadoML:order.status||'paid', modal, cordon, venta,
     comision:Math.round(comision), cuotas:Math.round(cuotas),
     costo:Math.round(costo), iva:Math.round(iva), ivaPct:prod?.iva||21,
     pub:Math.round(pub), iibb:Math.round(iibb),
