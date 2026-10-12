@@ -629,15 +629,19 @@ app.get('/plataforma/canceladas',async(req,res)=>{
     const h=hdr(token);
     const from=date_from||(new Date(Date.now()-30*864e5).toISOString().split('T')[0]);
     const to=date_to||(new Date().toISOString().split('T')[0]);
-    const r=await fetch(
-      `${ML}/orders/search?seller=${seller_id}&order.status=cancelled&order.date_created.from=${from}T00:00:00.000-03:00&order.date_created.to=${to}T23:59:59.999-03:00&sort=date_desc&limit=${limit}&offset=${offset}`,
-      {headers:h}
-    );
-    if(!r.ok) return res.json({ok:false,orders:[],status:r.status,msg:`HTTP ${r.status}`});
+    // Usar date_closed para capturar órdenes canceladas en ese período
+    // (pueden haber sido creadas antes pero canceladas dentro del rango)
+    const urlClosed=`${ML}/orders/search?seller=${seller_id}&order.status=cancelled&order.date_closed.from=${from}T00:00:00.000-03:00&order.date_closed.to=${to}T23:59:59.999-03:00&sort=date_desc&limit=${limit}&offset=${offset}`;
+    const r=await fetch(urlClosed,{headers:h});
+    if(!r.ok){
+      const errText=await r.text().catch(()=>'');
+      return res.json({ok:false,orders:[],status:r.status,msg:`HTTP ${r.status}`,detail:errText,url:urlClosed});
+    }
     const d=await r.json();
     const orders=(d.results||[]).map(o=>({
       id:o.id,
       fecha:o.date_created?.split('T')[0],
+      fecha_cierre:o.date_closed?.split('T')[0],
       motivo:o.cancel_detail?.description||o.cancel_reason||'—',
       comprador:o.buyer?.nickname||'—',
       items:(o.order_items||[]).map(i=>({
@@ -654,7 +658,8 @@ app.get('/plataforma/canceladas',async(req,res)=>{
       porMotivo[m].cant++; porMotivo[m].total+=o.total||0;
     });
     res.json({ok:true,orders,total:d.paging?.total||orders.length,
-      por_motivo:Object.values(porMotivo).sort((a,b)=>b.cant-a.cant)});
+      por_motivo:Object.values(porMotivo).sort((a,b)=>b.cant-a.cant),
+      _debug:{url:urlClosed,paging:d.paging,raw_count:d.results?.length}});
   }catch(e){res.status(500).json({error:e.message,orders:[]});}
 });
 
