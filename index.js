@@ -624,13 +624,13 @@ app.get('/zones',(req,res)=>res.json({zones:ZONA,total:Object.keys(ZONA).length}
 app.get('/plataforma/canceladas',async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token)return res.status(401).json({error:'Token requerido'});
-  const{seller_id,date_from,date_to,limit=50}=req.query;
+  const{seller_id,date_from,date_to,limit=50,offset=0}=req.query;
   try{
     const h=hdr(token);
     const from=date_from||(new Date(Date.now()-30*864e5).toISOString().split('T')[0]);
     const to=date_to||(new Date().toISOString().split('T')[0]);
     const r=await fetch(
-      `${ML}/orders/search?seller=${seller_id}&order.status=cancelled&order.date_created.from=${from}T00:00:00.000-03:00&order.date_created.to=${to}T23:59:59.999-03:00&sort=date_desc&limit=${limit}`,
+      `${ML}/orders/search?seller=${seller_id}&order.status=cancelled&order.date_created.from=${from}T00:00:00.000-03:00&order.date_created.to=${to}T23:59:59.999-03:00&sort=date_desc&limit=${limit}&offset=${offset}`,
       {headers:h}
     );
     if(!r.ok) return res.json({ok:false,orders:[],status:r.status,msg:`HTTP ${r.status}`});
