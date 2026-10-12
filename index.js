@@ -663,6 +663,43 @@ app.get('/plataforma/canceladas',async(req,res)=>{
   }catch(e){res.status(500).json({error:e.message,orders:[]});}
 });
 
+// ── ORDEN DETALLE ─────────────────────────────────────────────
+app.get('/plataforma/orden/:id',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token)return res.status(401).json({error:'Token requerido'});
+  const orderId=req.params.id;
+  try{
+    const h=hdr(token);
+    const r=await fetch(`${ML}/orders/${orderId}`,{headers:h});
+    if(!r.ok){
+      const t=await r.text().catch(()=>'');
+      return res.json({ok:false,status:r.status,msg:`HTTP ${r.status}`,detail:t});
+    }
+    const o=await r.json();
+    res.json({
+      ok:true,
+      id:o.id,
+      status:o.status,
+      fecha:o.date_created?.split('T')[0],
+      fecha_cierre:o.date_closed?.split('T')[0],
+      motivo:o.cancel_detail?.description||o.cancel_reason||null,
+      pack_id:o.pack_id||null,
+      shipping_id:o.shipping?.id||null,
+      total:o.total_amount,
+      moneda:o.currency_id,
+      comprador:o.buyer?.nickname||null,
+      items:(o.order_items||[]).map(i=>({
+        id:i.item?.id,
+        titulo:i.item?.title||'—',
+        qty:i.quantity,
+        precio:i.unit_price,
+        sku:i.item?.seller_custom_field||i.item?.id
+      })),
+      _raw:o
+    });
+  }catch(e){res.status(500).json({ok:false,error:e.message});}
+});
+
 app.post('/ai/market',async(req,res)=>{
   try{
     const{query,category}=req.body;
