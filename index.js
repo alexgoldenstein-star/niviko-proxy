@@ -663,6 +663,32 @@ app.get('/plataforma/canceladas',async(req,res)=>{
   }catch(e){res.status(500).json({error:e.message,orders:[]});}
 });
 
+// ── PACK: buscar todas las órdenes de un pack_id ──────────────
+app.get('/plataforma/pack/:pack_id',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token)return res.status(401).json({error:'Token requerido'});
+  const packId=req.params.pack_id;
+  try{
+    const h=hdr(token);
+    const r=await fetch(`${ML}/packs/${packId}`,{headers:h});
+    if(!r.ok){
+      const t=await r.text().catch(()=>'');
+      return res.json({ok:false,status:r.status,msg:`HTTP ${r.status}`,detail:t});
+    }
+    const d=await r.json();
+    // El pack tiene orders[] con referencias; devolvemos resumen útil
+    const orders=(d.orders||[]).map(o=>({
+      id:o.id,
+      status:o.status,
+      total:o.total_amount,
+      fecha:o.date_created?.split('T')[0]
+    }));
+    res.json({ok:true,pack_id:packId,orders,
+      shipping_id:d.shipment?.id||null,
+      _raw:d});
+  }catch(e){res.status(500).json({ok:false,error:e.message});}
+});
+
 // ── ORDEN DETALLE ─────────────────────────────────────────────
 app.get('/plataforma/orden/:id',async(req,res)=>{
   const token=req.headers['x-ml-token'];
