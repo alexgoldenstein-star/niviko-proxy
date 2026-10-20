@@ -1696,12 +1696,153 @@ function normalizeFJOrder(o){
   };
 }
 
+// ── REPLICAR: obtener item de ML por ID (cualquier vendedor) ─────────────────
+app.get('/replicar/item/:id',async(req,res)=>{
+  // No requiere token propio — item público, igual mandamos si existe
+  const token=req.headers['x-ml-token']||'';
+  const itemId=req.params.id.trim().toUpperCase();
+  try{
+    const h=token?hdr(token):{};
+    const [itemR,descR]=await Promise.all([
+      fetch(`${ML}/items/${itemId}`,{headers:h}).then(r=>r.json()),
+      fetch(`${ML}/items/${itemId}/description`,{headers:h}).then(r=>r.ok?r.json():{}).catch(()=>({}))
+    ]);
+    if(itemR.error||!itemR.id) return res.status(404).json({error:itemR.message||'Item no encontrado',raw:itemR});
+    // Extraer cuotas del listing_type
+    const cuotasInfo=[];
+    if(itemR.sale_terms){
+      const fin=itemR.sale_terms.find(t=>t.id==='TOTAL_AMOUNT');
+      if(fin?.value?.struct?.number) cuotasInfo.push({numero:12,monto:Math.ceil(fin.value.struct.number/12)});
+    }
+    res.json({
+      ok:true,
+      id:itemR.id,
+      titulo:itemR.title,
+      categoria:itemR.category_id,
+      precio:itemR.price,
+      moneda:itemR.currency_id||'ARS',
+      condicion:itemR.condition||'new',
+      listing_type:itemR.listing_type_id||'gold_special',
+      stock:itemR.available_quantity||1,
+      fotos:(itemR.pictures||[]).map(p=>({id:p.id,url:p.secure_url||p.url})),
+      atributos:(itemR.attributes||[]).filter(a=>a.value_id||a.value_name).slice(0,30),
+      descripcion:descR.plain_text||descR.text||'',
+      garantia:(itemR.warranty||''),
+      sale_terms:itemR.sale_terms||[],
+      envio:itemR.shipping||{},
+      cuotas:cuotasInfo
+    });
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+// ── REPLICAR: publicar item en UNA cuenta ─────────────────────────────────────
+app.post('/replicar/publicar',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const {titulo,categoria,precio,condicion,listing_type,stock,fotos,atributos,descripcion,garantia,envio,sale_terms,cuotas}=req.body;
+  if(!titulo||!categoria||!precio) return res.status(400).json({error:'Faltan campos: titulo, categoria, precio'});
+  try{
+    // Construir body del item
+    const body={
+      title:titulo,
+      category_id:categoria,
+      price:parseFloat(precio),
+      currency_id:'ARS',
+      available_quantity:parseInt(stock)||1,
+      buying_mode:'buy_it_now',
+      condition:condicion||'new',
+      listing_type_id:listing_type||'gold_special',
+      description:{plain_text:descripcion||''},
+      pictures:(fotos||[]).map(f=>({source:f.url||f})),
+      attributes:(atributos||[]),
+    };
+    // Sale terms (cuotas) si se especifican
+    if(sale_terms?.length) body.sale_terms=sale_terms;
+    // Garantía
+    if(garantia) body.warranty=garantia;
+    // Envío (shipping): preservar modo pero sin datos de vendedor anterior
+    if(envio?.mode) body.shipping={mode:envio.mode,free_shipping:envio.free_shipping||false};
+
+    const r=await fetch(`${ML}/items`,{
+      method:'POST',
+      headers:{...hdr(token),'Content-Type':'application/json'},
+      body:JSON.stringify(body)
+    });
+    const d=await r.json();
+    if(!r.ok||d.error) return res.json({ok:false,error:d.message||d.error||'Error ML',status:r.status,raw:d});
+    res.json({ok:true,id:d.id,permalink:d.permalink,status:d.status});
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+// ── REPLICAR: publicar en todas las cuentas pasadas (parallel) ────────────────
+app.post('/replicar/publicar-todas',async(req,res)=>{
+  // Body: { cuentas: [{id, token}], item: { titulo, categoria, precio, ... }, cuotas_override: [{cuenta, precio, sale_terms}] }
+  const {cuentas,item,cuotas_override=[]}=req.body;
+  if(!cuentas?.length||!item) return res.status(400).json({error:'Faltan cuentas o item'});
+  const resultados=await Promise.all(cuentas.map(async c=>{
+    try{
+      const override=cuotas_override.find(o=>o.cuenta===c.id)||{};
+      const body={
+        title:item.titulo,
+        category_id:item.categoria,
+        price:parseFloat(override.precio||item.precio),
+        currency_id:'ARS',
+        available_quantity:parseInt(item.stock)||1,
+        buying_mode:'buy_it_now',
+        condition:item.condicion||'new',
+        listing_type_id:item.listing_type||'gold_special',
+        description:{plain_text:item.descripcion||''},
+        pictures:(item.fotos||[]).map(f=>({source:f.url||f})),
+        attributes:(item.atributos||[]),
+      };
+      if(override.sale_terms?.length) body.sale_terms=override.sale_terms;
+      else if(item.sale_terms?.length) body.sale_terms=item.sale_terms;
+      if(item.garantia) body.warranty=item.garantia;
+      if(item.envio?.mode) body.shipping={mode:item.envio.mode,free_shipping:item.envio.free_shipping||false};
+      const r=await fetch(`${ML}/items`,{
+        method:'POST',
+        headers:{...hdr(c.token),'Content-Type':'application/json'},
+        body:JSON.stringify(body)
+      });
+      const d=await r.json();
+      if(!r.ok||d.error) return {cuenta:c.id,ok:false,error:d.message||d.error||'Error ML',status:r.status};
+      return {cuenta:c.id,ok:true,id:d.id,permalink:d.permalink,status:d.status};
+    }catch(e){
+      return {cuenta:c.id,ok:false,error:e.message};
+    }
+  }));
+  res.json({ok:true,resultados});
+});
+
+// ── REPLICAR: actualizar cuotas/precio de un item existente ──────────────────
+app.put('/replicar/item/:id',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const {precio,sale_terms,stock}=req.body;
+  const body={};
+  if(precio!=null) body.price=parseFloat(precio);
+  if(stock!=null) body.available_quantity=parseInt(stock);
+  if(sale_terms?.length) body.sale_terms=sale_terms;
+  if(!Object.keys(body).length) return res.status(400).json({error:'Nada que actualizar'});
+  try{
+    const r=await fetch(`${ML}/items/${req.params.id}`,{
+      method:'PUT',
+      headers:{...hdr(token),'Content-Type':'application/json'},
+      body:JSON.stringify(body)
+    });
+    const d=await r.json();
+    if(!r.ok||d.error) return res.json({ok:false,error:d.message||d.error,status:r.status});
+    res.json({ok:true,id:d.id,precio:d.price,status:d.status});
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
 app.get('/version',(req,res)=>res.json({
-  version:'9.3',
+  version:'9.4',
   iva_formula:'venta - venta/(1+ivaPct)',
   iibb_formula:'ventaSinIva * 0.04',
   anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
-  date:'2026-05-13'
+  date:'2026-10-20',
+  features:['replicar/item','replicar/publicar','replicar/publicar-todas','replicar/item PUT']
 }));
 app.listen(PORT,()=>console.log('NIVIKO Proxy v6.4 - Puerto '+PORT));
 module.exports=app;
