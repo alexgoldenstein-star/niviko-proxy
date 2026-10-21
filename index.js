@@ -284,10 +284,15 @@ function calcular(order, ship, fees, useBonifCost=false, umbralFreeShip=33000){
   const qty = item.quantity||1;
   const saleFeeTotal = Math.abs(item.sale_fee||0) * (tags.includes('pack_order') && qty>1 ? qty : 1);
 
-  // Si sale_fee total es más razonable (>8% de venta), usarlo
-  // Si no, estimar por porcentaje base (14%)
+  // Si la orden tiene order_has_discount (MercadoLíder con bonificación),
+  // sale_fee ya viene como comisión NETA (bruto − descuento) → usarlo siempre que sea > 0
+  const hasOrderDiscount = tags.includes('order_has_discount');
+  // Si sale_fee total es razonable (>8% de venta), usarlo; si no, estimar 14%
+  // EXCEPCIÓN: con order_has_discount el sale_fee puede ser < 8% siendo correcto
   const saleFeeRatio = venta>0 ? saleFeeTotal/venta : 0;
-  const comisionFallback = saleFeeRatio > 0.08 ? saleFeeTotal : venta*0.14;
+  const comisionFallback = (saleFeeRatio > 0.08 || (hasOrderDiscount && saleFeeTotal > 0))
+    ? saleFeeTotal
+    : venta*0.14;
 
   const comision = hasFeeDetail
     ? Math.max(0, Math.abs(feeML) - feeDescuentos)  // fee bruto − descuentos ML = comisión neta
