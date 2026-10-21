@@ -262,24 +262,35 @@ function calcular(order, ship, fees, useBonifCost=false, umbralFreeShip=33000){
   const tags = order.tags||[];
 
   // Comisión: fees.fee_detail[mercadolibre] es la fuente más precisa
-  // IMPORTANTE: fee_detail[mercadolibre] incluye TODO lo que cobra ML:
-  // - comisión porcentual, costo fijo, cuotas
+  // IMPORTANTE: fee_detail[mercadolibre] incluye la comisión BRUTA.
+  // ML puede aplicar un "Descuento en cargo por vender" (bonificación por nivel/promo)
+  // que aparece como una entrada POSITIVA separada en fee_detail (type='discount' u otro).
+  // La comisión NETA = |feeML| - descuentosPositivos sobre la comisión
   // Solo disponible DESPUÉS de la entrega (not_delivered → vacío)
   const feeML = (fees?.fee_detail||[]).find(f=>f.type==='mercadolibre'||f.type==='listing')?.value;
   const hasFeeDetail = feeML && feeML < 0;
-  
+
+  // Descuentos/bonificaciones sobre la comisión: entradas positivas en fee_detail
+  // que no son de envío (shipping) ni publicidad (advertising)
+  // Ej: "Descuento en cargo por vender" por nivel MercadoLíder o promos ML
+  const feeDescuentos = hasFeeDetail
+    ? (fees?.fee_detail||[])
+        .filter(f => f.value > 0 && f.type !== 'shipping' && f.type !== 'advertising' && f.type !== 'buyer')
+        .reduce((s,f) => s + f.value, 0)
+    : 0;
+
   // Fallback para not_delivered: sale_fee puede ser el fee de 1 unidad
   // Para pack_order: multiplicar por cantidad para obtener el fee total
   const qty = item.quantity||1;
   const saleFeeTotal = Math.abs(item.sale_fee||0) * (tags.includes('pack_order') && qty>1 ? qty : 1);
-  
+
   // Si sale_fee total es más razonable (>8% de venta), usarlo
   // Si no, estimar por porcentaje base (14%)
   const saleFeeRatio = venta>0 ? saleFeeTotal/venta : 0;
   const comisionFallback = saleFeeRatio > 0.08 ? saleFeeTotal : venta*0.14;
-  
+
   const comision = hasFeeDetail
-    ? Math.abs(feeML)        // fee_detail → más preciso, incluye todo
+    ? Math.max(0, Math.abs(feeML) - feeDescuentos)  // fee bruto − descuentos ML = comisión neta
     : comisionFallback;      // fallback: sale_fee*qty para pack, o 14% estimado
 
   // ── CUOTAS ───────────────────────────────────────────────────
@@ -490,6 +501,7 @@ app.get('/debug/order/:id',async(req,res)=>{
       SHIP_COST_RAW:ship?.cost,
       FEE_DETAIL:fees?.fee_detail,
       FEE_SHIPPING:fees?.fee_detail?.find?.(f=>f.type==='shipping')?.value,
+      FEE_DISCOUNTS:fees?.fee_detail?.filter?.(f=>f.value>0&&f.type!=='shipping'&&f.type!=='advertising'&&f.type!=='buyer'),
       LOYAL_DISCOUNT:ship?.cost_components?.loyal_discount,
       ORDER_HAS_DISCOUNT:(order.tags||[]).includes('order_has_discount'),
       PAYMENTS:order.payments?.map(p=>({
