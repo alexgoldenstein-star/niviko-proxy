@@ -1830,7 +1830,11 @@ app.post('/replicar/publicar',async(req,res)=>{
       body:JSON.stringify(body)
     });
     const d=await r.json();
-    if(!r.ok||d.error) return res.json({ok:false,error:d.message||d.error||'Error ML',status:r.status,raw:d});
+    if(!r.ok||d.error){
+      const msg=d.message||d.error||'Error ML';
+      const isUnauth=r.status===401||r.status===403||(d.causes||[]).some(c=>(c.code||'').toString().includes('UNAUTHORIZED')||(c.message||'').toLowerCase().includes('unauthorized'));
+      return res.json({ok:false,error:isUnauth?`Token sin permisos de escritura — re-autenticá la cuenta (${msg})`:msg,status:r.status,unauthorized:isUnauth,raw:d});
+    }
     res.json({ok:true,id:d.id,permalink:d.permalink,status:d.status});
   }catch(e){res.status(500).json({error:e.message});}
 });
@@ -1866,7 +1870,11 @@ app.post('/replicar/publicar-todas',async(req,res)=>{
         body:JSON.stringify(body)
       });
       const d=await r.json();
-      if(!r.ok||d.error) return {cuenta:c.id,ok:false,error:d.message||d.error||'Error ML',status:r.status};
+      if(!r.ok||d.error){
+        const msg=d.message||d.error||'Error ML';
+        const isUnauth=r.status===401||r.status===403||(d.causes||[]).some(c=>(c.code||'').toString().includes('UNAUTHORIZED')||(c.message||'').toLowerCase().includes('unauthorized'));
+        return {cuenta:c.id,ok:false,error:isUnauth?`Token sin permisos — re-autenticá esta cuenta`:msg,status:r.status,unauthorized:isUnauth};
+      }
       return {cuenta:c.id,ok:true,id:d.id,permalink:d.permalink,status:d.status};
     }catch(e){
       return {cuenta:c.id,ok:false,error:e.message};
@@ -1905,16 +1913,25 @@ app.put('/replicar/item/:id',async(req,res)=>{
 app.get('/promociones/items',async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token) return res.status(401).json({error:'Token requerido'});
-  const{seller_id,scroll_id,limit=50}=req.query;
+  const{seller_id}=req.query;
   try{
     const h=hdr(token);
-    // Traer items activos del vendedor
-    let url=`${ML}/users/${seller_id}/items/search?status=active&limit=${limit}`;
-    if(scroll_id) url+=`&scroll_id=${scroll_id}`;
-    const searchR=await fetch(url,{headers:h});
-    const search=await searchR.json();
-    const ids=(search.results||[]);
-    if(!ids.length) return res.json({items:[],scroll_id:search.scroll_id||null,total:search.paging?.total||0});
+    // Paginar TODOS los items activos (scroll automático)
+    let allIds=[];
+    let nextScroll=null;
+    for(let page=0;page<20;page++){
+      let url=`${ML}/users/${seller_id}/items/search?status=active&limit=100`;
+      if(page>0&&nextScroll) url+=`&scroll_id=${nextScroll}`;
+      else if(page>0) break;
+      const sr=await fetch(url,{headers:h});
+      const s=await sr.json();
+      const pageIds=s.results||[];
+      allIds=allIds.concat(pageIds);
+      nextScroll=s.scroll_id||null;
+      if(!pageIds.length||!nextScroll) break;
+    }
+    const ids=allIds;
+    if(!ids.length) return res.json({items:[],total:0});
     // Traer detalles de los items en batch (máx 20 por llamada)
     const chunks=[];
     for(let i=0;i<ids.length;i+=20) chunks.push(ids.slice(i,i+20));
@@ -1925,26 +1942,45 @@ app.get('/promociones/items',async(req,res)=>{
       if(Array.isArray(d)) d.forEach(x=>{if(x.code===200&&x.body) detalles.push(x.body);});
     }
     // Verificar cuales tienen aporte de ML (descuento co-financiado)
-    // ML usa el campo `deal_ids` o la API de promotions para detectar aportes ML
-    // Método pragmático: si original_price > price Y la diferencia es mayor al margen normal,
-    // probablemente es un aporte ML. Pero lo más confiable es llamar a /items/:id/promotions
-    // Hacemos batch de llamadas a promotions para todos los items con descuento activo
-    const itemsConDescuento=detalles.filter(it=>it.original_price!=null&&it.original_price>it.price);
+    // Método 1 (rápido): deal_ids no vacío en el item ya descargado — si tiene deals activos es ML
+    // Método 2 (fallback): llamar a /items/:id/promotions para items con original_price
+    // Re-fetch con deal_ids incluido en attributes
     const aporteMLMap={};
+    // Primero intentar con deal_ids directo en batch
+    const itemsConDescuento=detalles.filter(it=>it.original_price!=null&&it.original_price>it.price);
     if(itemsConDescuento.length){
-      await Promise.all(itemsConDescuento.map(async it=>{
+      // Re-fetch these items with deal_ids attribute
+      const dealChunks=[];
+      const idsDescuento=itemsConDescuento.map(it=>it.id);
+      for(let i=0;i<idsDescuento.length;i+=20) dealChunks.push(idsDescuento.slice(i,i+20));
+      for(const chunk of dealChunks){
         try{
-          const pr=await fetch(`${ML}/items/${it.id}/promotions`,{headers:h});
-          if(!pr.ok) return;
-          const prD=await pr.json();
-          // Si alguna promoción tiene type='deal' o status='candidate'/'active' con ML funding
-          const hasMLAporte=(Array.isArray(prD)?prD:[]).some(p=>
-            p.type==='deal'||p.funding_mode==='ML_FUNDED'||
-            (p.benefits&&p.benefits.some&&p.benefits.some(b=>b.provider==='ML'))
-          );
-          if(hasMLAporte) aporteMLMap[it.id]=true;
-        }catch(e){/* ignorar errores individuales */}
-      }));
+          const rd=await fetch(`${ML}/items?ids=${chunk.join(',')}&attributes=id,deal_ids`,{headers:h});
+          const dd=await rd.json();
+          if(Array.isArray(dd)) dd.forEach(x=>{
+            if(x.code===200&&x.body){
+              const di=x.body.deal_ids||[];
+              if(di.length>0) aporteMLMap[x.body.id]=true;
+            }
+          });
+        }catch(e){/* ignorar */}
+      }
+      // Fallback: para los que no se detectó via deal_ids, probar promotions API
+      const sinDetectar=itemsConDescuento.filter(it=>!aporteMLMap[it.id]);
+      if(sinDetectar.length>0&&sinDetectar.length<=10){
+        await Promise.all(sinDetectar.map(async it=>{
+          try{
+            const pr=await fetch(`${ML}/items/${it.id}/promotions`,{headers:h});
+            if(!pr.ok) return;
+            const prD=await pr.json();
+            const hasMLAporte=(Array.isArray(prD)?prD:[]).some(p=>
+              p.type==='deal'||p.funding_mode==='ML_FUNDED'||p.type==='lightning_deal'||
+              (p.benefits&&p.benefits.some&&p.benefits.some(b=>b.provider==='ML'))
+            );
+            if(hasMLAporte) aporteMLMap[it.id]=true;
+          }catch(e){/* ignorar */}
+        }));
+      }
     }
 
     const items=detalles.map(it=>{
@@ -1968,7 +2004,7 @@ app.get('/promociones/items',async(req,res)=>{
         margen_actual: costoArs&&it.price>0 ? Math.round(((it.price - costoArs - it.price*0.14 - it.price*0.04 - (it.price - it.price/1.21))/it.price)*100) : null,
       };
     });
-    res.json({items, scroll_id:search.scroll_id||null, total:search.paging?.total||0});
+    res.json({items, total:items.length});
   }catch(e){res.status(500).json({error:e.message,items:[]});}
 });
 
@@ -1988,7 +2024,11 @@ app.post('/promociones/precio',async(req,res)=>{
       body:JSON.stringify(body)
     });
     const d=await r.json();
-    if(!r.ok||d.error) return res.json({ok:false,error:d.message||d.error,status:r.status,raw:d});
+    if(!r.ok||d.error){
+      const msg=d.message||d.error||'Error ML';
+      const isUnauth=r.status===401||r.status===403||(d.causes||[]).some(c=>(c.code||'').toString().includes('UNAUTHORIZED')||(c.message||'').toLowerCase().includes('unauthorized'));
+      return res.json({ok:false,error:isUnauth?'Token sin permisos — re-autenticá la cuenta':msg,status:r.status,unauthorized:isUnauth,raw:d});
+    }
     res.json({ok:true,id:d.id,precio:d.price,precio_original:d.original_price||null});
   }catch(e){res.status(500).json({error:e.message});}
 });
@@ -2040,21 +2080,32 @@ app.post('/promociones/precio-bulk',async(req,res)=>{
 app.get('/catalogos/items',async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token) return res.status(401).json({error:'Token requerido'});
-  const{seller_id,scroll_id,limit=50}=req.query;
+  const{seller_id}=req.query;
   if(!seller_id) return res.status(400).json({error:'seller_id requerido'});
   try{
     const h=hdr(token);
-    // Buscar items activos del vendedor (catalog_listing=true no es confiable en todos los contextos)
-    let url=`${ML}/users/${seller_id}/items/search?status=active&limit=${limit}`;
-    if(scroll_id) url+=`&scroll_id=${scroll_id}`;
-    const searchR=await fetch(url,{headers:h});
-    const search=await searchR.json();
-    const ids=search.results||[];
-    if(!ids.length) return res.json({items:[],scroll_id:search.scroll_id||null,total:search.paging?.total||0});
+    // Paginar TODOS los items activos del vendedor (scroll automático hasta agotar)
+    let allIds=[];
+    let nextScroll=null;
+    let totalML=0;
+    for(let page=0;page<20;page++){// máx 20 páginas × 100 = 2000 items
+      let url=`${ML}/users/${seller_id}/items/search?status=active&limit=100`;
+      if(page===0) url+=''; // primera página sin scroll
+      else if(nextScroll) url+=`&scroll_id=${nextScroll}`;
+      else break;
+      const sr=await fetch(url,{headers:h});
+      const s=await sr.json();
+      const pageIds=s.results||[];
+      if(page===0) totalML=s.paging?.total||0;
+      allIds=allIds.concat(pageIds);
+      nextScroll=s.scroll_id||null;
+      if(!pageIds.length||!nextScroll) break;
+    }
+    if(!allIds.length) return res.json({items:[],total:0});
 
-    // Traer detalles incluyendo catalog_product_id
+    // Traer detalles incluyendo catalog_product_id (chunks de 20)
     const chunks=[];
-    for(let i=0;i<ids.length;i+=20) chunks.push(ids.slice(i,i+20));
+    for(let i=0;i<allIds.length;i+=20) chunks.push(allIds.slice(i,i+20));
     const detalles=[];
     for(const chunk of chunks){
       const r=await fetch(`${ML}/items?ids=${chunk.join(',')}&attributes=id,title,price,original_price,status,available_quantity,thumbnail,seller_sku,sale_terms,catalog_product_id,catalog_listing`,{headers:h});
@@ -2111,12 +2162,12 @@ app.get('/catalogos/items',async(req,res)=>{
       };
     }));
 
-    res.json({items, scroll_id:search.scroll_id||null, total:search.paging?.total||0});
+    res.json({items, total:items.length, total_activos:totalML});
   }catch(e){res.status(500).json({error:e.message,items:[]});}
 });
 
 app.get('/version',(req,res)=>res.json({
-  version:'9.6',
+  version:'9.8',
   iva_formula:'venta - venta/(1+ivaPct)',
   iibb_formula:'ventaSinIva * 0.04',
   anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
