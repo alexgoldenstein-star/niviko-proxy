@@ -2044,8 +2044,8 @@ app.get('/catalogos/items',async(req,res)=>{
   if(!seller_id) return res.status(400).json({error:'seller_id requerido'});
   try{
     const h=hdr(token);
-    // Buscar items del vendedor que tienen catalog_product_id (participan en catálogo)
-    let url=`${ML}/users/${seller_id}/items/search?status=active&catalog_listing=true&limit=${limit}`;
+    // Buscar items activos del vendedor (catalog_listing=true no es confiable en todos los contextos)
+    let url=`${ML}/users/${seller_id}/items/search?status=active&limit=${limit}`;
     if(scroll_id) url+=`&scroll_id=${scroll_id}`;
     const searchR=await fetch(url,{headers:h});
     const search=await searchR.json();
@@ -2062,8 +2062,10 @@ app.get('/catalogos/items',async(req,res)=>{
       if(Array.isArray(d)) d.forEach(x=>{if(x.code===200&&x.body) detalles.push(x.body);});
     }
 
+    // Filtrar solo items que participan en catálogo (tienen catalog_product_id)
+    const enCatalogo=detalles.filter(it=>it.catalog_product_id&&it.catalog_listing!==false);
     // Para cada item con catalog_product_id, obtener posición en catálogo
-    const items=await Promise.all(detalles.filter(it=>it.catalog_product_id).map(async it=>{
+    const items=await Promise.all(enCatalogo.map(async it=>{
       const sku=it.seller_sku||(it.sale_terms||[]).find(t=>t.id==='SELLER_SKU')?.value_name||'';
       let estado_catalogo='not_classified';
       let precio_ganador=null;
@@ -2084,6 +2086,15 @@ app.get('/catalogos/items',async(req,res)=>{
           }
         }
       }catch(e){/* ignorar errores de posición */}
+      // Margen estimado con precio actual (14% comisión + 4% IIBB + IVA 21%)
+      const p=it.price||0;
+      const comML=0.14, iibb=0.04;
+      const ivaPart=p-(p/1.21);
+      const margen_actual=p>0?Math.round(((p - p*comML - p*iibb - ivaPart)/p)*100):null;
+      // Margen si bajara al precio ganador
+      const pg=precio_ganador||0;
+      const ivaPg=pg-(pg/1.21);
+      const margen_ganador=pg>0?Math.round(((pg - pg*comML - pg*iibb - ivaPg)/pg)*100):null;
       return {
         id:it.id,
         titulo:it.title,
@@ -2094,7 +2105,9 @@ app.get('/catalogos/items',async(req,res)=>{
         catalog_product_id:it.catalog_product_id,
         estado_catalogo,
         precio_ganador,
-        vendedor_ganador
+        vendedor_ganador,
+        margen_actual,
+        margen_ganador
       };
     }));
 
@@ -2103,7 +2116,7 @@ app.get('/catalogos/items',async(req,res)=>{
 });
 
 app.get('/version',(req,res)=>res.json({
-  version:'9.5',
+  version:'9.6',
   iva_formula:'venta - venta/(1+ivaPct)',
   iibb_formula:'ventaSinIva * 0.04',
   anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
