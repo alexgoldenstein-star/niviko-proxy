@@ -1853,6 +1853,119 @@ app.put('/replicar/item/:id',async(req,res)=>{
   }catch(e){res.status(500).json({error:e.message});}
 });
 
+// ══════════════════════════════════════════════════════════════════
+// PROMOCIONES — gestión de descuentos en publicaciones
+// ══════════════════════════════════════════════════════════════════
+
+// GET /promociones/items — items activos con su precio y datos para calcular descuento
+app.get('/promociones/items',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const{seller_id,scroll_id,limit=50}=req.query;
+  try{
+    const h=hdr(token);
+    // Traer items activos del vendedor
+    let url=`${ML}/users/${seller_id}/items/search?status=active&limit=${limit}`;
+    if(scroll_id) url+=`&scroll_id=${scroll_id}`;
+    const searchR=await fetch(url,{headers:h});
+    const search=await searchR.json();
+    const ids=(search.results||[]);
+    if(!ids.length) return res.json({items:[],scroll_id:search.scroll_id||null,total:search.paging?.total||0});
+    // Traer detalles de los items en batch (máx 20 por llamada)
+    const chunks=[];
+    for(let i=0;i<ids.length;i+=20) chunks.push(ids.slice(i,i+20));
+    const detalles=[];
+    for(const chunk of chunks){
+      const r=await fetch(`${ML}/items?ids=${chunk.join(',')}&attributes=id,title,price,original_price,status,available_quantity,thumbnail,sale_terms,seller_sku`,{headers:h});
+      const d=await r.json();
+      if(Array.isArray(d)) d.forEach(x=>{if(x.code===200&&x.body) detalles.push(x.body);});
+    }
+    const items=detalles.map(it=>{
+      const sku=it.seller_sku||(it.sale_terms||[]).find(t=>t.id==='SELLER_SKU')?.value_name||'';
+      const prod=findProd(sku);
+      const costoArs=prod?prod.ars:null;
+      return {
+        id:it.id,
+        titulo:it.title,
+        precio:it.price,
+        precio_original:it.original_price||null,
+        descuento_activo:it.original_price!=null&&it.original_price>it.price,
+        pct_descuento_actual:it.original_price?Math.round((1-it.price/it.original_price)*100):0,
+        stock:it.available_quantity,
+        thumbnail:it.thumbnail,
+        sku,
+        costo:costoArs,
+        // Margen aproximado con precio actual (sin descuento adicional)
+        margen_actual: costoArs&&it.price>0 ? Math.round(((it.price - costoArs - it.price*0.14 - it.price*0.04 - (it.price - it.price/1.21))/it.price)*100) : null,
+      };
+    });
+    res.json({items, scroll_id:search.scroll_id||null, total:search.paging?.total||0});
+  }catch(e){res.status(500).json({error:e.message,items:[]});}
+});
+
+// POST /promociones/precio — aplicar descuento directo (precio tachado) a un item
+// Body: { item_id, precio_nuevo, precio_original? }
+app.post('/promociones/precio',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const{item_id,precio_nuevo,precio_original}=req.body;
+  if(!item_id||!precio_nuevo) return res.status(400).json({error:'Faltan item_id y precio_nuevo'});
+  try{
+    const body={price:parseFloat(precio_nuevo)};
+    if(precio_original) body.original_price=parseFloat(precio_original);
+    const r=await fetch(`${ML}/items/${item_id}`,{
+      method:'PUT',
+      headers:{...hdr(token),'Content-Type':'application/json'},
+      body:JSON.stringify(body)
+    });
+    const d=await r.json();
+    if(!r.ok||d.error) return res.json({ok:false,error:d.message||d.error,status:r.status,raw:d});
+    res.json({ok:true,id:d.id,precio:d.price,precio_original:d.original_price||null});
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+// DELETE /promociones/precio/:item_id — quitar precio tachado (restaurar precio sin descuento)
+app.delete('/promociones/precio/:item_id',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  try{
+    // Poner original_price en null quita el precio tachado
+    const r=await fetch(`${ML}/items/${req.params.item_id}`,{
+      method:'PUT',
+      headers:{...hdr(token),'Content-Type':'application/json'},
+      body:JSON.stringify({original_price:null})
+    });
+    const d=await r.json();
+    if(!r.ok||d.error) return res.json({ok:false,error:d.message||d.error,status:r.status});
+    res.json({ok:true,id:d.id,precio:d.price});
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+// POST /promociones/precio-bulk — aplicar descuento a múltiples items a la vez
+// Body: { items: [{item_id, precio_nuevo, precio_original}] }
+app.post('/promociones/precio-bulk',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const{items=[]}=req.body;
+  if(!items.length) return res.status(400).json({error:'Sin items'});
+  const resultados=await Promise.all(items.map(async it=>{
+    try{
+      const body={price:parseFloat(it.precio_nuevo)};
+      if(it.precio_original) body.original_price=parseFloat(it.precio_original);
+      const r=await fetch(`${ML}/items/${it.item_id}`,{
+        method:'PUT',
+        headers:{...hdr(token),'Content-Type':'application/json'},
+        body:JSON.stringify(body)
+      });
+      const d=await r.json();
+      if(!r.ok||d.error) return {item_id:it.item_id,ok:false,error:d.message||d.error};
+      return {item_id:it.item_id,ok:true,precio:d.price,precio_original:d.original_price||null};
+    }catch(e){return {item_id:it.item_id,ok:false,error:e.message};}
+  }));
+  const ok=resultados.filter(r=>r.ok).length;
+  res.json({ok:true,total:items.length,exitosos:ok,fallidos:items.length-ok,resultados});
+});
+
 app.get('/version',(req,res)=>res.json({
   version:'9.4',
   iva_formula:'venta - venta/(1+ivaPct)',
