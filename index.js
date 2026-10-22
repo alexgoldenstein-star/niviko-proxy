@@ -1713,6 +1713,50 @@ function normalizeFJOrder(o){
   };
 }
 
+// ── REPLICAR: buscar publicaciones por SKU, título o número ─────────────────
+// GET /replicar/buscar?q=...&seller_id=...
+app.get('/replicar/buscar',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const{q='',seller_id=''}=req.query;
+  if(!q.trim()) return res.status(400).json({error:'Parámetro q requerido'});
+  try{
+    const h=hdr(token);
+    // Si no se pasa seller_id, lo obtenemos del token
+    let sid=seller_id;
+    if(!sid){
+      const meR=await fetch(`${ML}/users/me`,{headers:h});
+      const me=await meR.json();
+      sid=me.id;
+    }
+    // Buscar por título dentro de las publicaciones del vendedor
+    const searchUrl=`${ML}/users/${sid}/items/search?search_type=scan&q=${encodeURIComponent(q)}&limit=20`;
+    const searchR=await fetch(searchUrl,{headers:h});
+    const search=await searchR.json();
+    let ids=search.results||[];
+
+    // Si no hay resultados por título, intentar buscar por SKU (seller_sku)
+    if(!ids.length){
+      const skuUrl=`${ML}/users/${sid}/items/search?seller_sku=${encodeURIComponent(q)}&limit=20`;
+      const skuR=await fetch(skuUrl,{headers:h});
+      const skuD=await skuR.json();
+      ids=skuD.results||[];
+    }
+
+    if(!ids.length) return res.json({items:[],total:0});
+
+    // Traer detalles básicos
+    const r=await fetch(`${ML}/items?ids=${ids.slice(0,20).join(',')}&attributes=id,title,price,thumbnail,status,seller_sku,sale_terms`,{headers:h});
+    const d=await r.json();
+    const items=(Array.isArray(d)?d:[]).filter(x=>x.code===200&&x.body).map(x=>{
+      const it=x.body;
+      const sku=it.seller_sku||(it.sale_terms||[]).find(t=>t.id==='SELLER_SKU')?.value_name||'';
+      return {id:it.id,titulo:it.title,precio:it.price,thumbnail:it.thumbnail,estado:it.status,sku};
+    });
+    res.json({items,total:items.length});
+  }catch(e){res.status(500).json({error:e.message,items:[]});}
+});
+
 // ── REPLICAR: obtener item de ML por ID (cualquier vendedor) ─────────────────
 app.get('/replicar/item/:id',async(req,res)=>{
   // No requiere token propio — item público, igual mandamos si existe
@@ -1880,10 +1924,34 @@ app.get('/promociones/items',async(req,res)=>{
       const d=await r.json();
       if(Array.isArray(d)) d.forEach(x=>{if(x.code===200&&x.body) detalles.push(x.body);});
     }
+    // Verificar cuales tienen aporte de ML (descuento co-financiado)
+    // ML usa el campo `deal_ids` o la API de promotions para detectar aportes ML
+    // Método pragmático: si original_price > price Y la diferencia es mayor al margen normal,
+    // probablemente es un aporte ML. Pero lo más confiable es llamar a /items/:id/promotions
+    // Hacemos batch de llamadas a promotions para todos los items con descuento activo
+    const itemsConDescuento=detalles.filter(it=>it.original_price!=null&&it.original_price>it.price);
+    const aporteMLMap={};
+    if(itemsConDescuento.length){
+      await Promise.all(itemsConDescuento.map(async it=>{
+        try{
+          const pr=await fetch(`${ML}/items/${it.id}/promotions`,{headers:h});
+          if(!pr.ok) return;
+          const prD=await pr.json();
+          // Si alguna promoción tiene type='deal' o status='candidate'/'active' con ML funding
+          const hasMLAporte=(Array.isArray(prD)?prD:[]).some(p=>
+            p.type==='deal'||p.funding_mode==='ML_FUNDED'||
+            (p.benefits&&p.benefits.some&&p.benefits.some(b=>b.provider==='ML'))
+          );
+          if(hasMLAporte) aporteMLMap[it.id]=true;
+        }catch(e){/* ignorar errores individuales */}
+      }));
+    }
+
     const items=detalles.map(it=>{
       const sku=it.seller_sku||(it.sale_terms||[]).find(t=>t.id==='SELLER_SKU')?.value_name||'';
       const prod=findProd(sku);
       const costoArs=prod?prod.ars:null;
+      const aporte_ml=!!aporteMLMap[it.id];
       return {
         id:it.id,
         titulo:it.title,
@@ -1891,6 +1959,7 @@ app.get('/promociones/items',async(req,res)=>{
         precio_original:it.original_price||null,
         descuento_activo:it.original_price!=null&&it.original_price>it.price,
         pct_descuento_actual:it.original_price?Math.round((1-it.price/it.original_price)*100):0,
+        aporte_ml,
         stock:it.available_quantity,
         thumbnail:it.thumbnail,
         sku,
@@ -1966,13 +2035,80 @@ app.post('/promociones/precio-bulk',async(req,res)=>{
   res.json({ok:true,total:items.length,exitosos:ok,fallidos:items.length-ok,resultados});
 });
 
+// ── CATÁLOGOS: items del vendedor participando en catálogos ML ───────────────
+// GET /catalogos/items?seller_id=...&limit=50&scroll_id=...
+app.get('/catalogos/items',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const{seller_id,scroll_id,limit=50}=req.query;
+  if(!seller_id) return res.status(400).json({error:'seller_id requerido'});
+  try{
+    const h=hdr(token);
+    // Buscar items del vendedor que tienen catalog_product_id (participan en catálogo)
+    let url=`${ML}/users/${seller_id}/items/search?status=active&catalog_listing=true&limit=${limit}`;
+    if(scroll_id) url+=`&scroll_id=${scroll_id}`;
+    const searchR=await fetch(url,{headers:h});
+    const search=await searchR.json();
+    const ids=search.results||[];
+    if(!ids.length) return res.json({items:[],scroll_id:search.scroll_id||null,total:search.paging?.total||0});
+
+    // Traer detalles incluyendo catalog_product_id
+    const chunks=[];
+    for(let i=0;i<ids.length;i+=20) chunks.push(ids.slice(i,i+20));
+    const detalles=[];
+    for(const chunk of chunks){
+      const r=await fetch(`${ML}/items?ids=${chunk.join(',')}&attributes=id,title,price,original_price,status,available_quantity,thumbnail,seller_sku,sale_terms,catalog_product_id,catalog_listing`,{headers:h});
+      const d=await r.json();
+      if(Array.isArray(d)) d.forEach(x=>{if(x.code===200&&x.body) detalles.push(x.body);});
+    }
+
+    // Para cada item con catalog_product_id, obtener posición en catálogo
+    const items=await Promise.all(detalles.filter(it=>it.catalog_product_id).map(async it=>{
+      const sku=it.seller_sku||(it.sale_terms||[]).find(t=>t.id==='SELLER_SKU')?.value_name||'';
+      let estado_catalogo='not_classified';
+      let precio_ganador=null;
+      let vendedor_ganador=null;
+      try{
+        // Consultar producto de catálogo para ver posición
+        const catR=await fetch(`${ML}/products/${it.catalog_product_id}/items?status=active&limit=5`,{headers:h});
+        if(catR.ok){
+          const catD=await catR.json();
+          const results=catD.results||[];
+          if(results.length){
+            const winner=results[0];
+            precio_ganador=winner.price;
+            vendedor_ganador=winner.seller?.nickname||null;
+            if(winner.seller_id==seller_id) estado_catalogo='winning';
+            else if(it.price<=winner.price) estado_catalogo='tied';
+            else estado_catalogo='losing';
+          }
+        }
+      }catch(e){/* ignorar errores de posición */}
+      return {
+        id:it.id,
+        titulo:it.title,
+        precio:it.price,
+        stock:it.available_quantity,
+        thumbnail:it.thumbnail,
+        sku,
+        catalog_product_id:it.catalog_product_id,
+        estado_catalogo,
+        precio_ganador,
+        vendedor_ganador
+      };
+    }));
+
+    res.json({items, scroll_id:search.scroll_id||null, total:search.paging?.total||0});
+  }catch(e){res.status(500).json({error:e.message,items:[]});}
+});
+
 app.get('/version',(req,res)=>res.json({
-  version:'9.4',
+  version:'9.5',
   iva_formula:'venta - venta/(1+ivaPct)',
   iibb_formula:'ventaSinIva * 0.04',
   anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
   date:'2026-10-20',
-  features:['replicar/item','replicar/publicar','replicar/publicar-todas','replicar/item PUT']
+  features:['replicar/item','replicar/buscar','replicar/publicar','replicar/publicar-todas','replicar/item PUT','catalogos/items','promociones/aporte_ml']
 }));
 app.listen(PORT,()=>console.log('NIVIKO Proxy v6.4 - Puerto '+PORT));
 module.exports=app;
