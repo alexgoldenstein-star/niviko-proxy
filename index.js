@@ -1757,6 +1757,50 @@ app.get('/replicar/buscar',async(req,res)=>{
   }catch(e){res.status(500).json({error:e.message,items:[]});}
 });
 
+// ── REPLICAR: buscar publicaciones propias del vendedor ───────────────────────
+app.get('/replicar/mis-items',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const {q='',seller_id='',limit='12'}=req.query;
+  if(!seller_id) return res.status(400).json({error:'seller_id requerido'});
+  try{
+    const h=hdr(token);
+    const lim=Math.min(parseInt(limit)||12,50);
+    // Buscar publicaciones activas del vendedor filtrando por query
+    let url=`${ML}/users/${seller_id}/items/search?status=active&limit=${lim}`;
+    if(q.trim()){
+      // Usar search con query y seller como filtro
+      url=`${ML}/sites/MLA/search?seller_id=${seller_id}&q=${encodeURIComponent(q)}&limit=${lim}`;
+    }
+    const sr=await fetch(url,{headers:h});
+    const sd=await sr.json();
+    // Obtener IDs de resultados
+    const ids=(sd.results||[]).map(r=>typeof r==='string'?r:r.id).filter(Boolean).slice(0,lim);
+    if(!ids.length) return res.json({items:[],total:0});
+    // Fetch detalles en batch (máx 20 a la vez)
+    const batched=[];
+    for(let i=0;i<ids.length;i+=20){
+      const chunk=ids.slice(i,i+20);
+      const br=await fetch(`${ML}/items?ids=${chunk.join(',')}&attributes=id,title,price,thumbnail,status,attributes`,{headers:h});
+      const bd=await br.json();
+      batched.push(...(bd||[]));
+    }
+    const items=batched.map(b=>{
+      const it=b.body||b;
+      const skuAttr=(it.attributes||[]).find(a=>a.id==='SELLER_SKU');
+      return {
+        id:it.id,
+        titulo:it.title,
+        precio:it.price,
+        thumbnail:it.thumbnail,
+        status:it.status,
+        sku:skuAttr?.value_name||''
+      };
+    }).filter(it=>it.id);
+    res.json({items,total:items.length});
+  }catch(e){res.status(500).json({error:e.message,items:[]});}
+});
+
 // ── REPLICAR: obtener item de ML por ID (cualquier vendedor) ─────────────────
 app.get('/replicar/item/:id',async(req,res)=>{
   // No requiere token propio — item público, igual mandamos si existe
@@ -1778,6 +1822,7 @@ app.get('/replicar/item/:id',async(req,res)=>{
     res.json({
       ok:true,
       id:itemR.id,
+      seller_id:itemR.seller_id||null,
       titulo:itemR.title,
       categoria:itemR.category_id,
       precio:itemR.price,
@@ -1966,20 +2011,24 @@ app.get('/promociones/items',async(req,res)=>{
         }catch(e){/* ignorar */}
       }
       // Fallback: para los que no se detectó via deal_ids, probar promotions API
+      // Limitado a 30 concurrent para evitar rate limit, procesamos en tandas de 10
       const sinDetectar=itemsConDescuento.filter(it=>!aporteMLMap[it.id]);
-      if(sinDetectar.length>0&&sinDetectar.length<=10){
-        await Promise.all(sinDetectar.map(async it=>{
-          try{
-            const pr=await fetch(`${ML}/items/${it.id}/promotions`,{headers:h});
-            if(!pr.ok) return;
-            const prD=await pr.json();
-            const hasMLAporte=(Array.isArray(prD)?prD:[]).some(p=>
-              p.type==='deal'||p.funding_mode==='ML_FUNDED'||p.type==='lightning_deal'||
-              (p.benefits&&p.benefits.some&&p.benefits.some(b=>b.provider==='ML'))
-            );
-            if(hasMLAporte) aporteMLMap[it.id]=true;
-          }catch(e){/* ignorar */}
-        }));
+      if(sinDetectar.length>0){
+        for(let i=0;i<sinDetectar.length;i+=10){
+          const tanda=sinDetectar.slice(i,i+10);
+          await Promise.all(tanda.map(async it=>{
+            try{
+              const pr=await fetch(`${ML}/items/${it.id}/promotions`,{headers:h});
+              if(!pr.ok) return;
+              const prD=await pr.json();
+              const hasMLAporte=(Array.isArray(prD)?prD:[]).some(p=>
+                p.type==='deal'||p.funding_mode==='ML_FUNDED'||p.type==='lightning_deal'||
+                (p.benefits&&p.benefits.some&&p.benefits.some(b=>b.provider==='ML'||b.funded_by==='ML'))
+              );
+              if(hasMLAporte) aporteMLMap[it.id]=true;
+            }catch(e){/* ignorar */}
+          }));
+        }
       }
     }
 
@@ -2167,7 +2216,7 @@ app.get('/catalogos/items',async(req,res)=>{
 });
 
 app.get('/version',(req,res)=>res.json({
-  version:'9.8',
+  version:'9.9',
   iva_formula:'venta - venta/(1+ivaPct)',
   iibb_formula:'ventaSinIva * 0.04',
   anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
