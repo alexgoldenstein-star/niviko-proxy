@@ -1729,18 +1729,53 @@ app.get('/replicar/buscar',async(req,res)=>{
       const me=await meR.json();
       sid=me.id;
     }
-    // Buscar por título dentro de las publicaciones del vendedor
-    const searchUrl=`${ML}/users/${sid}/items/search?search_type=scan&q=${encodeURIComponent(q)}&limit=20`;
-    const searchR=await fetch(searchUrl,{headers:h});
-    const search=await searchR.json();
-    let ids=search.results||[];
+    const raw=q.trim();
+    // Detectar si es búsqueda por SKU (no contiene espacios y tiene guiones o parece código)
+    const esSku=/^[A-Z0-9]([A-Z0-9\-]+)$/i.test(raw)&&!raw.includes(' ');
 
-    // Si no hay resultados por título, intentar buscar por SKU (seller_sku)
-    if(!ids.length){
-      const skuUrl=`${ML}/users/${sid}/items/search?seller_sku=${encodeURIComponent(q)}&limit=20`;
-      const skuR=await fetch(skuUrl,{headers:h});
-      const skuD=await skuR.json();
-      ids=skuD.results||[];
+    let ids=[];
+
+    if(esSku){
+      // Para SKU: paginar los items del vendedor y filtrar localmente por seller_sku
+      // ML no expone seller_sku como filtro de búsqueda — hay que fetchear en batch y comparar
+      let allIds=[];
+      let nextScroll=null;
+      for(let page=0;page<10;page++){// máx 10 páginas × 100 = 1000 items
+        let url=`${ML}/users/${sid}/items/search?status=active&limit=100&search_type=scan`;
+        if(nextScroll) url+=`&scroll_id=${encodeURIComponent(nextScroll)}`;
+        const sr=await fetch(url,{headers:h});
+        const s=await sr.json();
+        const pageIds=s.results||[];
+        allIds=allIds.concat(pageIds);
+        nextScroll=s.scroll_id||null;
+        if(!pageIds.length||!nextScroll) break;
+      }
+      if(allIds.length){
+        // Traer en batch con seller_sku y filtrar
+        const matchIds=[];
+        for(let i=0;i<allIds.length;i+=20){
+          const chunk=allIds.slice(i,i+20);
+          try{
+            const br=await fetch(`${ML}/items?ids=${chunk.join(',')}&attributes=id,seller_sku,sale_terms`,{headers:h});
+            const bd=await br.json();
+            if(Array.isArray(bd)) bd.forEach(x=>{
+              if(x.code===200&&x.body){
+                const it=x.body;
+                const sku=it.seller_sku||(it.sale_terms||[]).find(t=>t.id==='SELLER_SKU')?.value_name||'';
+                if(sku.toLowerCase()===raw.toLowerCase()) matchIds.push(it.id);
+              }
+            });
+          }catch(e){/* ignorar chunk */}
+          if(matchIds.length>=8) break;// suficiente
+        }
+        ids=matchIds;
+      }
+    } else {
+      // Búsqueda por título usando el buscador de ML del vendedor
+      const searchUrl=`${ML}/users/${sid}/items/search?q=${encodeURIComponent(raw)}&limit=20`;
+      const searchR=await fetch(searchUrl,{headers:h});
+      const search=await searchR.json();
+      ids=search.results||[];
     }
 
     if(!ids.length) return res.json({items:[],total:0});
@@ -2087,28 +2122,63 @@ app.get('/promociones/items',async(req,res)=>{
   }catch(e){res.status(500).json({error:e.message,items:[]});}
 });
 
-// POST /promociones/precio — aplicar descuento directo (precio tachado) a un item
-// Body: { item_id, precio_nuevo, precio_original? }
+// POST /promociones/precio — aplicar descuento (precio tachado) a un item
+// Body: { item_id, precio_nuevo, precio_original, seller_id, dias? }
+// Usa seller-promotions API v2 que es el método correcto según ML docs
 app.post('/promociones/precio',async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token) return res.status(401).json({error:'Token requerido'});
-  const{item_id,precio_nuevo,precio_original}=req.body;
+  const{item_id,precio_nuevo,precio_original,seller_id,dias=30}=req.body;
   if(!item_id||!precio_nuevo) return res.status(400).json({error:'Faltan item_id y precio_nuevo'});
   try{
-    const body={price:parseFloat(precio_nuevo)};
-    if(precio_original) body.original_price=parseFloat(precio_original);
-    const r=await fetch(`${ML}/items/${item_id}`,{
-      method:'PUT',
-      headers:{...hdr(token),'Content-Type':'application/json'},
+    const h={...hdr(token),'Content-Type':'application/json','version':'v2'};
+    // Obtener seller_id si no viene
+    let sid=seller_id;
+    if(!sid){
+      const meR=await fetch(`${ML}/users/me`,{headers:hdr(token)});
+      const me=await meR.json();
+      sid=me.id;
+    }
+    // Calcular fechas (inicio ahora, fin en X días)
+    const ahora=new Date();
+    const fin=new Date(ahora.getTime()+dias*24*60*60*1000);
+    const fmt=d=>d.toISOString().slice(0,19)+'.000Z';
+
+    // Método 1: seller-promotions API (precio tachado oficial)
+    const body={
+      deal_price:parseFloat(precio_nuevo),
+      promotion_type:'PRICE_DISCOUNT',
+      start_date:fmt(ahora),
+      finish_date:fmt(fin)
+    };
+    const r=await fetch(`${ML}/marketplace/seller-promotions/items/${item_id}?user_id=${sid}`,{
+      method:'POST',
+      headers:h,
       body:JSON.stringify(body)
     });
     const d=await r.json();
-    if(!r.ok||d.error){
-      const msg=d.message||d.error||'Error ML';
-      const isUnauth=r.status===401||r.status===403||(d.causes||[]).some(c=>(c.code||'').toString().includes('UNAUTHORIZED')||(c.message||'').toLowerCase().includes('unauthorized'));
-      return res.json({ok:false,error:isUnauth?'Token sin permisos — re-autenticá la cuenta':msg,status:r.status,unauthorized:isUnauth,raw:d});
+    if(r.ok&&!d.error){
+      return res.json({ok:true,id:item_id,precio:parseFloat(precio_nuevo),precio_original:precio_original||null,metodo:'seller_promotions'});
     }
-    res.json({ok:true,id:d.id,precio:d.price,precio_original:d.original_price||null});
+    // Método 2 (fallback): PUT directo al item con original_price
+    const isUnauth=r.status===401||r.status===403;
+    if(!isUnauth){
+      const body2={price:parseFloat(precio_nuevo)};
+      if(precio_original) body2.original_price=parseFloat(precio_original);
+      const r2=await fetch(`${ML}/items/${item_id}`,{
+        method:'PUT',
+        headers:{...hdr(token),'Content-Type':'application/json'},
+        body:JSON.stringify(body2)
+      });
+      const d2=await r2.json();
+      if(r2.ok&&!d2.error){
+        return res.json({ok:true,id:d2.id,precio:d2.price,precio_original:d2.original_price||null,metodo:'put_items'});
+      }
+      const msg2=d2.message||d2.error||'Error ML';
+      const isUnauth2=r2.status===401||r2.status===403||(d2.causes||[]).some(c=>(c.code||'').toString().includes('UNAUTHORIZED')||(c.message||'').toLowerCase().includes('unauthorized'));
+      return res.json({ok:false,error:isUnauth2?'Token sin permisos — re-autenticá la cuenta':msg2,status:r2.status,unauthorized:isUnauth2,raw:d2,raw_promo:d});
+    }
+    return res.json({ok:false,error:'Token sin permisos — re-autenticá la cuenta',status:r.status,unauthorized:true,raw:d});
   }catch(e){res.status(500).json({error:e.message});}
 });
 
@@ -2130,28 +2200,90 @@ app.delete('/promociones/precio/:item_id',async(req,res)=>{
 });
 
 // POST /promociones/precio-bulk — aplicar descuento a múltiples items a la vez
-// Body: { items: [{item_id, precio_nuevo, precio_original}] }
+// Body: { items: [{item_id, precio_nuevo, precio_original}], seller_id, dias? }
 app.post('/promociones/precio-bulk',async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token) return res.status(401).json({error:'Token requerido'});
-  const{items=[]}=req.body;
+  const{items=[],seller_id,dias=30}=req.body;
   if(!items.length) return res.status(400).json({error:'Sin items'});
+  // Obtener seller_id si no viene
+  let sid=seller_id;
+  if(!sid){
+    try{const meR=await fetch(`${ML}/users/me`,{headers:hdr(token)});const me=await meR.json();sid=me.id;}catch(e){}
+  }
+  const h={...hdr(token),'Content-Type':'application/json','version':'v2'};
+  const ahora=new Date();
+  const fin=new Date(ahora.getTime()+dias*24*60*60*1000);
+  const fmt=d=>d.toISOString().slice(0,19)+'.000Z';
+
   const resultados=await Promise.all(items.map(async it=>{
     try{
-      const body={price:parseFloat(it.precio_nuevo)};
-      if(it.precio_original) body.original_price=parseFloat(it.precio_original);
-      const r=await fetch(`${ML}/items/${it.item_id}`,{
-        method:'PUT',
-        headers:{...hdr(token),'Content-Type':'application/json'},
-        body:JSON.stringify(body)
-      });
-      const d=await r.json();
-      if(!r.ok||d.error) return {item_id:it.item_id,ok:false,error:d.message||d.error};
-      return {item_id:it.item_id,ok:true,precio:d.price,precio_original:d.original_price||null};
+      // Método 1: seller-promotions
+      if(sid){
+        const body={deal_price:parseFloat(it.precio_nuevo),promotion_type:'PRICE_DISCOUNT',start_date:fmt(ahora),finish_date:fmt(fin)};
+        const r=await fetch(`${ML}/marketplace/seller-promotions/items/${it.item_id}?user_id=${sid}`,{method:'POST',headers:h,body:JSON.stringify(body)});
+        const d=await r.json();
+        if(r.ok&&!d.error) return {item_id:it.item_id,ok:true,precio:parseFloat(it.precio_nuevo),precio_original:it.precio_original||null};
+      }
+      // Fallback: PUT directo
+      const body2={price:parseFloat(it.precio_nuevo)};
+      if(it.precio_original) body2.original_price=parseFloat(it.precio_original);
+      const r2=await fetch(`${ML}/items/${it.item_id}`,{method:'PUT',headers:{...hdr(token),'Content-Type':'application/json'},body:JSON.stringify(body2)});
+      const d2=await r2.json();
+      if(!r2.ok||d2.error) return {item_id:it.item_id,ok:false,error:d2.message||d2.error};
+      return {item_id:it.item_id,ok:true,precio:d2.price,precio_original:d2.original_price||null};
     }catch(e){return {item_id:it.item_id,ok:false,error:e.message};}
   }));
   const ok=resultados.filter(r=>r.ok).length;
   res.json({ok:true,total:items.length,exitosos:ok,fallidos:items.length-ok,resultados});
+});
+
+// GET /promociones/deals?seller_id= — listar campañas/deals ofrecidas por ML al vendedor
+app.get('/promociones/deals',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const{seller_id}=req.query;
+  if(!seller_id) return res.status(400).json({error:'seller_id requerido'});
+  try{
+    const h=hdr(token);
+    // Deals activos y candidatos ofrecidos por ML
+    const [dealsStarted,dealsCand,promos]=await Promise.all([
+      fetch(`${ML}/users/${seller_id}/deals?status=started`,{headers:h}).then(r=>r.json()).catch(()=>({})),
+      fetch(`${ML}/users/${seller_id}/deals?status=candidate`,{headers:h}).then(r=>r.json()).catch(()=>({})),
+      fetch(`${ML}/seller-promotions/users/${seller_id}/promotions?app_version=v2&status=active&limit=30`,{headers:h}).then(r=>r.json()).catch(()=>({}))
+    ]);
+    const deals=[
+      ...(dealsStarted.results||dealsStarted.deals||[]).map(d=>({...d,estado_deal:'activo'})),
+      ...(dealsCand.results||dealsCand.deals||[]).map(d=>({...d,estado_deal:'candidato'}))
+    ];
+    const promosActivas=promos.results||promos.promotions||[];
+    res.json({
+      deals:deals.map(d=>({
+        id:d.id,
+        nombre:d.name||d.deal_print_id||d.id,
+        tipo:d.type||'deal',
+        estado:d.estado_deal,
+        inicio:d.start_date,
+        fin:d.finish_date||d.end_date,
+        items_count:d.items_count||0,
+        descuento_pct:d.percentage||null,
+        es_ml:true
+      })),
+      promociones:promosActivas.map(p=>({
+        id:p.id,
+        nombre:p.name||p.label||p.id,
+        tipo:'promotion',
+        estado:p.status,
+        inicio:p.start_date,
+        fin:p.finish_date||p.end_date,
+        items_count:p.items_count||0,
+        descuento_pct:p.percentage||p.percent_off||null,
+        es_ml:false
+      })),
+      total_deals:deals.length,
+      total_promociones:promosActivas.length
+    });
+  }catch(e){res.status(500).json({error:e.message,deals:[],promociones:[]});}
 });
 
 // ── CATÁLOGOS: items del vendedor participando en catálogos ML ───────────────
