@@ -1870,18 +1870,20 @@ app.post('/replicar/publicar',async(req,res)=>{
     if(envio?.mode) body.shipping={mode:envio.mode,free_shipping:envio.free_shipping||false};
     // NOTA: description NO va en el POST /items — se envía por separado después de crear
 
+    console.log('[PUBLICAR] body enviado a ML:', JSON.stringify(body,null,2));
     const r=await fetch(`${ML}/items`,{
       method:'POST',
       headers:{...hdr(token),'Content-Type':'application/json'},
       body:JSON.stringify(body)
     });
     const d=await r.json();
+    console.log('[PUBLICAR] respuesta ML status:', r.status, JSON.stringify(d,null,2));
     if(!r.ok||d.error){
       const msg=d.message||d.error||'Error ML';
       const causes=(d.causes||[]).map(c=>c.message||c.code||'').filter(Boolean).join(' | ');
       const detail=causes?`${msg}: ${causes}`:msg;
       const isUnauth=r.status===401||r.status===403||(d.causes||[]).some(c=>(c.code||'').toString().includes('UNAUTHORIZED')||(c.message||'').toLowerCase().includes('unauthorized'));
-      return res.json({ok:false,error:isUnauth?`Token sin permisos de escritura — re-autenticá la cuenta`:detail,causes:d.causes||[],status:r.status,unauthorized:isUnauth});
+      return res.json({ok:false,error:isUnauth?`Token sin permisos de escritura — re-autenticá la cuenta`:detail,causes:d.causes||[],status:r.status,unauthorized:isUnauth,ml_raw:d});
     }
     // Item creado — ahora agregar descripción por separado (ML no acepta description en POST /items)
     if(descripcion){
@@ -1923,18 +1925,20 @@ app.post('/replicar/publicar-todas',async(req,res)=>{
       if(item.garantia) body.warranty=item.garantia;
       if(item.envio?.mode) body.shipping={mode:item.envio.mode,free_shipping:item.envio.free_shipping||false};
       // NOTA: description NO va en el POST /items — se envía por separado después de crear
+      console.log(`[PUBLICAR-TODAS][${c.id}] body:`, JSON.stringify(body,null,2));
       const r=await fetch(`${ML}/items`,{
         method:'POST',
         headers:{...hdr(c.token),'Content-Type':'application/json'},
         body:JSON.stringify(body)
       });
       const d=await r.json();
+      console.log(`[PUBLICAR-TODAS][${c.id}] respuesta ML status:`, r.status, JSON.stringify(d,null,2));
       if(!r.ok||d.error){
         const msg=d.message||d.error||'Error ML';
         const causes=(d.causes||[]).map(cx=>cx.message||cx.code||'').filter(Boolean).join(' | ');
         const detail=causes?`${msg}: ${causes}`:msg;
         const isUnauth=r.status===401||r.status===403||(d.causes||[]).some(cx=>(cx.code||'').toString().includes('UNAUTHORIZED')||(cx.message||'').toLowerCase().includes('unauthorized'));
-        return {cuenta:c.id,ok:false,error:isUnauth?`Token sin permisos — re-autenticá esta cuenta`:detail,causes:d.causes||[],status:r.status,unauthorized:isUnauth};
+        return {cuenta:c.id,ok:false,error:isUnauth?`Token sin permisos — re-autenticá esta cuenta`:detail,causes:d.causes||[],status:r.status,unauthorized:isUnauth,ml_raw:d};
       }
       // Agregar descripción por separado
       if(item.descripcion){
