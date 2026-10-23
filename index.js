@@ -1849,6 +1849,7 @@ app.post('/replicar/publicar',async(req,res)=>{
   if(!titulo||!categoria||!precio) return res.status(400).json({error:'Faltan campos: titulo, categoria, precio'});
   try{
     // Construir body del item
+    const fotosValidas=(fotos||[]).filter(f=>(f.url||f||'').toString().startsWith('http'));
     const body={
       title:titulo,
       category_id:categoria,
@@ -1859,9 +1860,9 @@ app.post('/replicar/publicar',async(req,res)=>{
       condition:condicion||'new',
       listing_type_id:listing_type||'gold_special',
       description:{plain_text:descripcion||''},
-      pictures:(fotos||[]).map(f=>({source:f.url||f})),
       attributes:(atributos||[]),
     };
+    if(fotosValidas.length) body.pictures=fotosValidas.map(f=>({source:f.url||f}));
     // Sale terms (cuotas) si se especifican
     if(sale_terms?.length) body.sale_terms=sale_terms;
     // Garantía
@@ -1877,8 +1878,10 @@ app.post('/replicar/publicar',async(req,res)=>{
     const d=await r.json();
     if(!r.ok||d.error){
       const msg=d.message||d.error||'Error ML';
+      const causes=(d.causes||[]).map(c=>c.message||c.code||'').filter(Boolean).join(' | ');
+      const detail=causes?`${msg}: ${causes}`:msg;
       const isUnauth=r.status===401||r.status===403||(d.causes||[]).some(c=>(c.code||'').toString().includes('UNAUTHORIZED')||(c.message||'').toLowerCase().includes('unauthorized'));
-      return res.json({ok:false,error:isUnauth?`Token sin permisos de escritura — re-autenticá la cuenta (${msg})`:msg,status:r.status,unauthorized:isUnauth,raw:d});
+      return res.json({ok:false,error:isUnauth?`Token sin permisos de escritura — re-autenticá la cuenta`:detail,causes:d.causes||[],status:r.status,unauthorized:isUnauth});
     }
     res.json({ok:true,id:d.id,permalink:d.permalink,status:d.status});
   }catch(e){res.status(500).json({error:e.message});}
@@ -1892,6 +1895,7 @@ app.post('/replicar/publicar-todas',async(req,res)=>{
   const resultados=await Promise.all(cuentas.map(async c=>{
     try{
       const override=cuotas_override.find(o=>o.cuenta===c.id)||{};
+      const fotosValidas=(item.fotos||[]).filter(f=>(f.url||f||'').toString().startsWith('http'));
       const body={
         title:item.titulo,
         category_id:item.categoria,
@@ -1902,9 +1906,9 @@ app.post('/replicar/publicar-todas',async(req,res)=>{
         condition:item.condicion||'new',
         listing_type_id:item.listing_type||'gold_special',
         description:{plain_text:item.descripcion||''},
-        pictures:(item.fotos||[]).map(f=>({source:f.url||f})),
         attributes:(item.atributos||[]),
       };
+      if(fotosValidas.length) body.pictures=fotosValidas.map(f=>({source:f.url||f}));
       if(override.sale_terms?.length) body.sale_terms=override.sale_terms;
       else if(item.sale_terms?.length) body.sale_terms=item.sale_terms;
       if(item.garantia) body.warranty=item.garantia;
@@ -1917,8 +1921,10 @@ app.post('/replicar/publicar-todas',async(req,res)=>{
       const d=await r.json();
       if(!r.ok||d.error){
         const msg=d.message||d.error||'Error ML';
-        const isUnauth=r.status===401||r.status===403||(d.causes||[]).some(c=>(c.code||'').toString().includes('UNAUTHORIZED')||(c.message||'').toLowerCase().includes('unauthorized'));
-        return {cuenta:c.id,ok:false,error:isUnauth?`Token sin permisos — re-autenticá esta cuenta`:msg,status:r.status,unauthorized:isUnauth};
+        const causes=(d.causes||[]).map(cx=>cx.message||cx.code||'').filter(Boolean).join(' | ');
+        const detail=causes?`${msg}: ${causes}`:msg;
+        const isUnauth=r.status===401||r.status===403||(d.causes||[]).some(cx=>(cx.code||'').toString().includes('UNAUTHORIZED')||(cx.message||'').toLowerCase().includes('unauthorized'));
+        return {cuenta:c.id,ok:false,error:isUnauth?`Token sin permisos — re-autenticá esta cuenta`:detail,causes:d.causes||[],status:r.status,unauthorized:isUnauth};
       }
       return {cuenta:c.id,ok:true,id:d.id,permalink:d.permalink,status:d.status};
     }catch(e){
@@ -1962,18 +1968,20 @@ app.get('/promociones/items',async(req,res)=>{
   try{
     const h=hdr(token);
     // Paginar TODOS los items activos (scroll automático)
+    // ML requiere scroll=true en la primera llamada para activar modo scroll
     let allIds=[];
     let nextScroll=null;
     for(let page=0;page<20;page++){
       let url=`${ML}/users/${seller_id}/items/search?status=active&limit=100`;
-      if(page>0&&nextScroll) url+=`&scroll_id=${nextScroll}`;
-      else if(page>0) break;
+      if(page===0) url+=`&scroll=true`;
+      else if(nextScroll) url+=`&scroll_id=${encodeURIComponent(nextScroll)}`;
+      else break;
       const sr=await fetch(url,{headers:h});
       const s=await sr.json();
       const pageIds=s.results||[];
       allIds=allIds.concat(pageIds);
       nextScroll=s.scroll_id||null;
-      if(!pageIds.length||!nextScroll) break;
+      if(!pageIds.length) break;
     }
     const ids=allIds;
     if(!ids.length) return res.json({items:[],total:0});
@@ -2134,13 +2142,14 @@ app.get('/catalogos/items',async(req,res)=>{
   try{
     const h=hdr(token);
     // Paginar TODOS los items activos del vendedor (scroll automático hasta agotar)
+    // ML requiere scroll=true en la primera llamada para activar modo scroll
     let allIds=[];
     let nextScroll=null;
     let totalML=0;
     for(let page=0;page<20;page++){// máx 20 páginas × 100 = 2000 items
       let url=`${ML}/users/${seller_id}/items/search?status=active&limit=100`;
-      if(page===0) url+=''; // primera página sin scroll
-      else if(nextScroll) url+=`&scroll_id=${nextScroll}`;
+      if(page===0) url+=`&scroll=true`;
+      else if(nextScroll) url+=`&scroll_id=${encodeURIComponent(nextScroll)}`;
       else break;
       const sr=await fetch(url,{headers:h});
       const s=await sr.json();
@@ -2148,7 +2157,7 @@ app.get('/catalogos/items',async(req,res)=>{
       if(page===0) totalML=s.paging?.total||0;
       allIds=allIds.concat(pageIds);
       nextScroll=s.scroll_id||null;
-      if(!pageIds.length||!nextScroll) break;
+      if(!pageIds.length) break;
     }
     if(!allIds.length) return res.json({items:[],total:0});
 
@@ -2199,6 +2208,9 @@ app.get('/catalogos/items',async(req,res)=>{
         id:it.id,
         titulo:it.title,
         precio:it.price,
+        precio_original:it.original_price||null,
+        descuento_activo:it.original_price!=null&&it.original_price>it.price,
+        pct_descuento:it.original_price?Math.round((1-it.price/it.original_price)*100):0,
         stock:it.available_quantity,
         thumbnail:it.thumbnail,
         sku,
@@ -2216,7 +2228,7 @@ app.get('/catalogos/items',async(req,res)=>{
 });
 
 app.get('/version',(req,res)=>res.json({
-  version:'9.9',
+  version:'10.0',
   iva_formula:'venta - venta/(1+ivaPct)',
   iibb_formula:'ventaSinIva * 0.04',
   anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
