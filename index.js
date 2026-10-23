@@ -1859,7 +1859,6 @@ app.post('/replicar/publicar',async(req,res)=>{
       buying_mode:'buy_it_now',
       condition:condicion||'new',
       listing_type_id:listing_type||'gold_special',
-      description:{plain_text:descripcion||''},
       attributes:(atributos||[]),
     };
     if(fotosValidas.length) body.pictures=fotosValidas.map(f=>({source:f.url||f}));
@@ -1869,6 +1868,7 @@ app.post('/replicar/publicar',async(req,res)=>{
     if(garantia) body.warranty=garantia;
     // Envío (shipping): preservar modo pero sin datos de vendedor anterior
     if(envio?.mode) body.shipping={mode:envio.mode,free_shipping:envio.free_shipping||false};
+    // NOTA: description NO va en el POST /items — se envía por separado después de crear
 
     const r=await fetch(`${ML}/items`,{
       method:'POST',
@@ -1882,6 +1882,16 @@ app.post('/replicar/publicar',async(req,res)=>{
       const detail=causes?`${msg}: ${causes}`:msg;
       const isUnauth=r.status===401||r.status===403||(d.causes||[]).some(c=>(c.code||'').toString().includes('UNAUTHORIZED')||(c.message||'').toLowerCase().includes('unauthorized'));
       return res.json({ok:false,error:isUnauth?`Token sin permisos de escritura — re-autenticá la cuenta`:detail,causes:d.causes||[],status:r.status,unauthorized:isUnauth});
+    }
+    // Item creado — ahora agregar descripción por separado (ML no acepta description en POST /items)
+    if(descripcion){
+      try{
+        await fetch(`${ML}/items/${d.id}/descriptions`,{
+          method:'POST',
+          headers:{...hdr(token),'Content-Type':'application/json'},
+          body:JSON.stringify({plain_text:descripcion})
+        });
+      }catch(e){/* descripción es opcional, no fallar si falla */}
     }
     res.json({ok:true,id:d.id,permalink:d.permalink,status:d.status});
   }catch(e){res.status(500).json({error:e.message});}
@@ -1905,7 +1915,6 @@ app.post('/replicar/publicar-todas',async(req,res)=>{
         buying_mode:'buy_it_now',
         condition:item.condicion||'new',
         listing_type_id:item.listing_type||'gold_special',
-        description:{plain_text:item.descripcion||''},
         attributes:(item.atributos||[]),
       };
       if(fotosValidas.length) body.pictures=fotosValidas.map(f=>({source:f.url||f}));
@@ -1913,6 +1922,7 @@ app.post('/replicar/publicar-todas',async(req,res)=>{
       else if(item.sale_terms?.length) body.sale_terms=item.sale_terms;
       if(item.garantia) body.warranty=item.garantia;
       if(item.envio?.mode) body.shipping={mode:item.envio.mode,free_shipping:item.envio.free_shipping||false};
+      // NOTA: description NO va en el POST /items — se envía por separado después de crear
       const r=await fetch(`${ML}/items`,{
         method:'POST',
         headers:{...hdr(c.token),'Content-Type':'application/json'},
@@ -1925,6 +1935,16 @@ app.post('/replicar/publicar-todas',async(req,res)=>{
         const detail=causes?`${msg}: ${causes}`:msg;
         const isUnauth=r.status===401||r.status===403||(d.causes||[]).some(cx=>(cx.code||'').toString().includes('UNAUTHORIZED')||(cx.message||'').toLowerCase().includes('unauthorized'));
         return {cuenta:c.id,ok:false,error:isUnauth?`Token sin permisos — re-autenticá esta cuenta`:detail,causes:d.causes||[],status:r.status,unauthorized:isUnauth};
+      }
+      // Agregar descripción por separado
+      if(item.descripcion){
+        try{
+          await fetch(`${ML}/items/${d.id}/descriptions`,{
+            method:'POST',
+            headers:{...hdr(c.token),'Content-Type':'application/json'},
+            body:JSON.stringify({plain_text:item.descripcion})
+          });
+        }catch(e){/* ignorar error en descripción */}
       }
       return {cuenta:c.id,ok:true,id:d.id,permalink:d.permalink,status:d.status};
     }catch(e){
@@ -2162,7 +2182,7 @@ app.get('/catalogos/items',async(req,res)=>{
     for(let i=0;i<allIds.length;i+=20) chunks.push(allIds.slice(i,i+20));
     const detalles=[];
     for(const chunk of chunks){
-      const r=await fetch(`${ML}/items?ids=${chunk.join(',')}&attributes=id,title,price,original_price,status,available_quantity,thumbnail,seller_sku,sale_terms,catalog_product_id,catalog_listing`,{headers:h});
+      const r=await fetch(`${ML}/items?ids=${chunk.join(',')}&attributes=id,title,price,original_price,deal_ids,status,available_quantity,thumbnail,seller_sku,sale_terms,catalog_product_id,catalog_listing`,{headers:h});
       const d=await r.json();
       if(Array.isArray(d)) d.forEach(x=>{if(x.code===200&&x.body) detalles.push(x.body);});
     }
@@ -2200,12 +2220,15 @@ app.get('/catalogos/items',async(req,res)=>{
       const pg=precio_ganador||0;
       const ivaPg=pg-(pg/1.21);
       const margen_ganador=pg>0?Math.round(((pg - pg*comML - pg*iibb - ivaPg)/pg)*100):null;
+      const tieneDescPrecio=it.original_price!=null&&it.original_price>it.price;
+      const tieneAporteML=(it.deal_ids||[]).length>0;
       return {
         id:it.id,
         titulo:it.title,
         precio:it.price,
         precio_original:it.original_price||null,
-        descuento_activo:it.original_price!=null&&it.original_price>it.price,
+        descuento_activo:tieneDescPrecio||tieneAporteML,
+        aporte_ml:tieneAporteML,
         pct_descuento:it.original_price?Math.round((1-it.price/it.original_price)*100):0,
         stock:it.available_quantity,
         thumbnail:it.thumbnail,
