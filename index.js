@@ -1967,21 +1967,19 @@ app.get('/promociones/items',async(req,res)=>{
   const{seller_id}=req.query;
   try{
     const h=hdr(token);
-    // Paginar TODOS los items activos (scroll automático)
-    // ML requiere scroll=true en la primera llamada para activar modo scroll
+    // Paginar TODOS los items activos usando search_type=scan (correcto según docs ML)
+    // Requiere search_type=scan en CADA llamada + scroll_id para páginas subsiguientes
     let allIds=[];
     let nextScroll=null;
     for(let page=0;page<20;page++){
-      let url=`${ML}/users/${seller_id}/items/search?status=active&limit=100`;
-      if(page===0) url+=`&scroll=true`;
-      else if(nextScroll) url+=`&scroll_id=${encodeURIComponent(nextScroll)}`;
-      else break;
+      let url=`${ML}/users/${seller_id}/items/search?status=active&limit=100&search_type=scan`;
+      if(nextScroll) url+=`&scroll_id=${encodeURIComponent(nextScroll)}`;
       const sr=await fetch(url,{headers:h});
       const s=await sr.json();
       const pageIds=s.results||[];
       allIds=allIds.concat(pageIds);
       nextScroll=s.scroll_id||null;
-      if(!pageIds.length) break;
+      if(!pageIds.length||!nextScroll) break;
     }
     const ids=allIds;
     if(!ids.length) return res.json({items:[],total:0});
@@ -2141,23 +2139,21 @@ app.get('/catalogos/items',async(req,res)=>{
   if(!seller_id) return res.status(400).json({error:'seller_id requerido'});
   try{
     const h=hdr(token);
-    // Paginar TODOS los items activos del vendedor (scroll automático hasta agotar)
-    // ML requiere scroll=true en la primera llamada para activar modo scroll
+    // Paginar TODOS los items activos usando search_type=scan (correcto según docs ML)
+    // Requiere search_type=scan en CADA llamada + scroll_id para páginas subsiguientes
     let allIds=[];
     let nextScroll=null;
     let totalML=0;
     for(let page=0;page<20;page++){// máx 20 páginas × 100 = 2000 items
-      let url=`${ML}/users/${seller_id}/items/search?status=active&limit=100`;
-      if(page===0) url+=`&scroll=true`;
-      else if(nextScroll) url+=`&scroll_id=${encodeURIComponent(nextScroll)}`;
-      else break;
+      let url=`${ML}/users/${seller_id}/items/search?status=active&limit=100&search_type=scan`;
+      if(nextScroll) url+=`&scroll_id=${encodeURIComponent(nextScroll)}`;
       const sr=await fetch(url,{headers:h});
       const s=await sr.json();
       const pageIds=s.results||[];
       if(page===0) totalML=s.paging?.total||0;
       allIds=allIds.concat(pageIds);
       nextScroll=s.scroll_id||null;
-      if(!pageIds.length) break;
+      if(!pageIds.length||!nextScroll) break;
     }
     if(!allIds.length) return res.json({items:[],total:0});
 
