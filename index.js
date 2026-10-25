@@ -1802,26 +1802,73 @@ app.get('/replicar/buscar',async(req,res)=>{
 app.get('/replicar/mis-items',async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token) return res.status(401).json({error:'Token requerido'});
-  const {q='',seller_id='',limit='12'}=req.query;
+  const {q='',seller_id='',limit='50'}=req.query;
   if(!seller_id) return res.status(400).json({error:'seller_id requerido'});
   try{
     const h=hdr(token);
-    const lim=Math.min(parseInt(limit)||12,50);
-    // Buscar publicaciones activas del vendedor filtrando por query
-    let url=`${ML}/users/${seller_id}/items/search?status=active&limit=${lim}`;
-    if(q.trim()){
-      // Usar search con query y seller como filtro
-      url=`${ML}/sites/MLA/search?seller_id=${seller_id}&q=${encodeURIComponent(q)}&limit=${lim}`;
+    const lim=Math.min(parseInt(limit)||50,100);
+    const qTrim=q.trim().toLowerCase();
+    let allIds=[];
+
+    if(!qTrim){
+      // Sin query: traer los últimos N ítems activos del vendedor con scroll
+      let nextScroll=null;
+      for(let page=0;page<3&&allIds.length<lim;page++){
+        let url=`${ML}/users/${seller_id}/items/search?status=active&limit=100&search_type=scan`;
+        if(nextScroll) url+=`&scroll_id=${encodeURIComponent(nextScroll)}`;
+        const sr=await fetch(url,{headers:h});
+        const sd=await sr.json();
+        const pageIds=(sd.results||[]).filter(Boolean);
+        allIds=allIds.concat(pageIds);
+        nextScroll=sd.scroll_id||null;
+        if(!pageIds.length||!nextScroll) break;
+      }
+      allIds=allIds.slice(0,lim);
+    } else {
+      // Con query: buscar en buscador ML Y también traer todos y filtrar localmente
+      // 1) buscador ML público filtrado por seller
+      try{
+        const srMl=await fetch(`${ML}/sites/MLA/search?seller_id=${seller_id}&q=${encodeURIComponent(qTrim)}&limit=50`,{headers:h});
+        const sdMl=await srMl.json();
+        allIds=(sdMl.results||[]).map(r=>typeof r==='string'?r:r.id).filter(Boolean);
+      }catch(e){}
+      // 2) Si no encontró, escanear todos y filtrar por título localmente
+      if(!allIds.length){
+        let scanIds=[];
+        let nextScroll=null;
+        for(let page=0;page<10;page++){
+          let url=`${ML}/users/${seller_id}/items/search?status=active&limit=100&search_type=scan`;
+          if(nextScroll) url+=`&scroll_id=${encodeURIComponent(nextScroll)}`;
+          const sr=await fetch(url,{headers:h});
+          const sd=await sr.json();
+          scanIds=scanIds.concat((sd.results||[]).filter(Boolean));
+          nextScroll=sd.scroll_id||null;
+          if(!sd.results?.length||!nextScroll) break;
+        }
+        // Para filtrar por título necesitamos los detalles — solo si el conjunto es manejable
+        if(scanIds.length){
+          const palabras=qTrim.split(/\s+/).filter(Boolean);
+          for(let i=0;i<scanIds.length&&allIds.length<lim;i+=20){
+            const chunk=scanIds.slice(i,i+20);
+            const br=await fetch(`${ML}/items?ids=${chunk.join(',')}&attributes=id,title,attributes`,{headers:h});
+            const bd=await br.json();
+            if(Array.isArray(bd)) bd.forEach(x=>{
+              if(x.code===200&&x.body){
+                const it=x.body;
+                const haystack=((it.title||'')+' '+((it.attributes||[]).find(a=>a.id==='SELLER_SKU')?.value_name||'')).toLowerCase();
+                if(palabras.every(p=>haystack.includes(p))) allIds.push(it.id);
+              }
+            });
+          }
+        }
+      }
     }
-    const sr=await fetch(url,{headers:h});
-    const sd=await sr.json();
-    // Obtener IDs de resultados
-    const ids=(sd.results||[]).map(r=>typeof r==='string'?r:r.id).filter(Boolean).slice(0,lim);
-    if(!ids.length) return res.json({items:[],total:0});
+
+    if(!allIds.length) return res.json({items:[],total:0});
     // Fetch detalles en batch (máx 20 a la vez)
     const batched=[];
-    for(let i=0;i<ids.length;i+=20){
-      const chunk=ids.slice(i,i+20);
+    for(let i=0;i<allIds.slice(0,lim).length;i+=20){
+      const chunk=allIds.slice(i,i+20);
       const br=await fetch(`${ML}/items?ids=${chunk.join(',')}&attributes=id,title,price,thumbnail,status,attributes`,{headers:h});
       const bd=await br.json();
       batched.push(...(bd||[]));
@@ -1882,6 +1929,25 @@ app.get('/replicar/item/:id',async(req,res)=>{
   }catch(e){res.status(500).json({error:e.message});}
 });
 
+// Helper: limpiar atributos para replicar (quitar los que ML no acepta en POST)
+function limpiarAtributos(attrs){
+  // IDs que ML rechaza al crear un item nuevo (son del vendedor original o internos)
+  const SKIP_IDS=new Set(['SELLER_SKU','ITEM_CONDITION','GTIN','EAN','BRAND','MODEL',
+    'ALPHANUMERIC_MODEL','SELLER_ID','ITEM_ID','CATALOG_PRODUCT_ID']);
+  // Solo pasar atributos que tienen value_id o value_name (no vacíos) y no son internos
+  return (attrs||[]).filter(a=>{
+    if(!a.id) return false;
+    // Conservar atributos que tienen valor
+    const tieneValor=a.value_id||a.value_name;
+    if(!tieneValor) return false;
+    return true;// pasar todos con valor, ML ignora los que no reconoce
+  }).map(a=>({
+    id:a.id,
+    ...(a.value_id?{value_id:a.value_id}:{}),
+    ...(a.value_name?{value_name:a.value_name}:{})
+  }));
+}
+
 // ── REPLICAR: publicar item en UNA cuenta ─────────────────────────────────────
 app.post('/replicar/publicar',async(req,res)=>{
   const token=req.headers['x-ml-token'];
@@ -1900,11 +1966,12 @@ app.post('/replicar/publicar',async(req,res)=>{
       buying_mode:'buy_it_now',
       condition:condicion||'new',
       listing_type_id:listing_type||'gold_special',
-      attributes:(atributos||[]),
+      attributes:limpiarAtributos(atributos),
     };
     if(fotosValidas.length) body.pictures=fotosValidas.map(f=>({source:f.url||f}));
-    // Sale terms (cuotas) si se especifican
-    if(sale_terms?.length) body.sale_terms=sale_terms;
+    // Sale terms: solo pasar cuotas/financiación, NO términos del vendedor original
+    const saleTermsLimpios=(sale_terms||[]).filter(t=>['FREE_SHIPPING','IMMEDIATE_PAYMENT'].includes(t.id));
+    if(saleTermsLimpios.length) body.sale_terms=saleTermsLimpios;
     // Garantía
     if(garantia) body.warranty=garantia;
     // Envío (shipping): preservar modo pero sin datos de vendedor anterior
@@ -1958,11 +2025,11 @@ app.post('/replicar/publicar-todas',async(req,res)=>{
         buying_mode:'buy_it_now',
         condition:item.condicion||'new',
         listing_type_id:item.listing_type||'gold_special',
-        attributes:(item.atributos||[]),
+        attributes:limpiarAtributos(item.atributos),
       };
       if(fotosValidas.length) body.pictures=fotosValidas.map(f=>({source:f.url||f}));
+      // Sale terms: solo cuotas del override (ya validadas), NO los del vendedor original
       if(override.sale_terms?.length) body.sale_terms=override.sale_terms;
-      else if(item.sale_terms?.length) body.sale_terms=item.sale_terms;
       if(item.garantia) body.warranty=item.garantia;
       if(item.envio?.mode) body.shipping={mode:item.envio.mode,free_shipping:item.envio.free_shipping||false};
       // NOTA: description NO va en el POST /items — se envía por separado después de crear
