@@ -1931,16 +1931,24 @@ app.get('/replicar/item/:id',async(req,res)=>{
 
 // Helper: limpiar atributos para replicar (quitar los que ML no acepta en POST)
 function limpiarAtributos(attrs){
-  // IDs que ML rechaza al crear un item nuevo (son del vendedor original o internos)
-  const SKIP_IDS=new Set(['SELLER_SKU','ITEM_CONDITION','GTIN','EAN','BRAND','MODEL',
-    'ALPHANUMERIC_MODEL','SELLER_ID','ITEM_ID','CATALOG_PRODUCT_ID']);
-  // Solo pasar atributos que tienen value_id o value_name (no vacíos) y no son internos
+  // IDs que ML rechaza al crear un item nuevo desde cero
+  // (son del vendedor original, internos de ML, o de catálogo)
+  const SKIP_IDS=new Set([
+    'SELLER_SKU','ITEM_CONDITION','GTIN','EAN',
+    'ALPHANUMERIC_MODEL','SELLER_ID','ITEM_ID',
+    'CATALOG_PRODUCT_ID','CATALOG_LISTING_TYPE_ID',
+    'FAMILY_NAME','family_name',
+    'ITEM_RELATIONS','PRICE_NET_AMOUNT',
+    'UNITS_PER_PACKAGE' // puede causar problemas con valor -1
+  ]);
   return (attrs||[]).filter(a=>{
     if(!a.id) return false;
-    // Conservar atributos que tienen valor
+    if(SKIP_IDS.has(a.id)||SKIP_IDS.has(a.id.toUpperCase())) return false;
     const tieneValor=a.value_id||a.value_name;
     if(!tieneValor) return false;
-    return true;// pasar todos con valor, ML ignora los que no reconoce
+    // Filtrar valores negativos o placeholder (-1, 0, etc en campos numéricos)
+    if(a.value_name&&(a.value_name==='-1'||a.value_name==='0')) return false;
+    return true;
   }).map(a=>({
     id:a.id,
     ...(a.value_id?{value_id:a.value_id}:{}),
@@ -1969,13 +1977,16 @@ app.post('/replicar/publicar',async(req,res)=>{
       attributes:limpiarAtributos(atributos),
     };
     if(fotosValidas.length) body.pictures=fotosValidas.map(f=>({source:f.url||f}));
-    // Sale terms: solo pasar cuotas/financiación, NO términos del vendedor original
-    const saleTermsLimpios=(sale_terms||[]).filter(t=>['FREE_SHIPPING','IMMEDIATE_PAYMENT'].includes(t.id));
-    if(saleTermsLimpios.length) body.sale_terms=saleTermsLimpios;
-    // Garantía
-    if(garantia) body.warranty=garantia;
-    // Envío (shipping): preservar modo pero sin datos de vendedor anterior
-    if(envio?.mode) body.shipping={mode:envio.mode,free_shipping:envio.free_shipping||false};
+    // Sale terms: NO pasar sale_terms del vendedor original — causa errores
+    // Solo pasar cuotas sin interés si se configuraron explícitamente
+    const saleTermsCuotas=(sale_terms||[]).filter(t=>t.id==='INSTALLMENTS');
+    if(saleTermsCuotas.length) body.sale_terms=saleTermsCuotas;
+    // Garantía: solo si es texto simple
+    if(garantia&&typeof garantia==='string'&&garantia.length<200) body.warranty=garantia;
+    // Envío: solo modo básico, sin datos del vendedor anterior
+    if(envio?.mode&&envio.mode!=='not_specified'){
+      body.shipping={mode:envio.mode,free_shipping:!!envio.free_shipping};
+    }
     // NOTA: description NO va en el POST /items — se envía por separado después de crear
 
     console.log('[PUBLICAR] body enviado a ML:', JSON.stringify(body,null,2));
