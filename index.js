@@ -2010,7 +2010,9 @@ app.post('/replicar/publicar',async(req,res)=>{
     console.log('[PUBLICAR] respuesta:', r.status, JSON.stringify(d,null,2));
 
     // Si falla con family_name → reintentar con modelo User Products (sin title, con family_name)
-    if((!r.ok||d.error) && (d.causes||[]).some(c=>(c.message||'').includes('family_name'))){
+    // NOTA: ML devuelve "cause" (singular) en errores 400, no "causes"
+    const causes400=(d.causes||d.cause||[]);
+    if((!r.ok||d.error) && causes400.some(c=>(c.message||'').includes('family_name')||(c.code||'').includes('family_name'))){
       console.log('[PUBLICAR] retry User Products con family_name:', fn);
       const bodyUP={...body, family_name:fn};
       delete bodyUP.title;
@@ -2079,8 +2081,10 @@ app.post('/replicar/publicar-todas',async(req,res)=>{
       console.log(`[PUBLICAR-TODAS][${c.id}] respuesta ML status:`, r.status, JSON.stringify(d,null,2));
 
       // Intento 2: si ML pide family_name → User Products (sin title, con family_name)
+      // NOTA: ML devuelve "cause" (singular), no "causes"
+      const causesArr400=(d.causes||d.cause||[]);
       const needsFamilyName=(!r.ok||d.error)&&(
-        (d.causes||[]).some(cx=>(cx.message||'').toLowerCase().includes('family_name'))||
+        causesArr400.some(cx=>(cx.message||'').toLowerCase().includes('family_name')||(cx.code||'').toLowerCase().includes('family_name'))||
         (d.message||'').toLowerCase().includes('family_name')
       );
       if(needsFamilyName){
