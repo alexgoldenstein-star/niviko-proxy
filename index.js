@@ -2043,14 +2043,15 @@ app.post('/replicar/publicar',async(req,res)=>{
 
 // ── REPLICAR: publicar en todas las cuentas pasadas (parallel) ────────────────
 app.post('/replicar/publicar-todas',async(req,res)=>{
-  // Body: { cuentas: [{id, token}], item: { titulo, categoria, precio, ... }, cuotas_override: [{cuenta, precio, sale_terms}] }
+  // Body: { cuentas: [{id, token}], item: { titulo, categoria, precio, family_name, ... }, cuotas_override: [{cuenta, precio, sale_terms}] }
   const {cuentas,item,cuotas_override=[]}=req.body;
   if(!cuentas?.length||!item) return res.status(400).json({error:'Faltan cuentas o item'});
+  const fn=item.family_name||item.titulo?.substring(0,60)||'Producto';
   const resultados=await Promise.all(cuentas.map(async c=>{
     try{
       const override=cuotas_override.find(o=>o.cuenta===c.id)||{};
       const fotosValidas=(item.fotos||[]).filter(f=>(f.url||f||'').toString().startsWith('http'));
-      const body={
+      const bodyBase={
         title:item.titulo,
         category_id:item.categoria,
         price:parseFloat(override.precio||item.precio),
@@ -2061,25 +2062,47 @@ app.post('/replicar/publicar-todas',async(req,res)=>{
         listing_type_id:item.listing_type||'gold_special',
         attributes:limpiarAtributos(item.atributos),
       };
-      if(fotosValidas.length) body.pictures=fotosValidas.map(f=>({source:f.url||f}));
-      // Sale terms: solo cuotas del override (ya validadas), NO los del vendedor original
-      if(override.sale_terms?.length) body.sale_terms=override.sale_terms;
-      if(item.garantia) body.warranty=item.garantia;
-      if(item.envio?.mode) body.shipping={mode:item.envio.mode,free_shipping:item.envio.free_shipping||false};
-      // NOTA: description NO va en el POST /items — se envía por separado después de crear
-      console.log(`[PUBLICAR-TODAS][${c.id}] body:`, JSON.stringify(body,null,2));
-      const r=await fetch(`${ML}/items`,{
+      if(fotosValidas.length) bodyBase.pictures=fotosValidas.map(f=>({source:f.url||f}));
+      if(override.sale_terms?.length) bodyBase.sale_terms=override.sale_terms;
+      if(item.garantia) bodyBase.warranty=item.garantia;
+      if(item.envio?.mode) bodyBase.shipping={mode:item.envio.mode,free_shipping:item.envio.free_shipping||false};
+      // NOTA: description NO va en el POST /items — se envía por separado
+
+      // Intento 1: Legacy (con title)
+      console.log(`[PUBLICAR-TODAS][${c.id}] intento legacy`);
+      let r=await fetch(`${ML}/items`,{
         method:'POST',
         headers:{...hdr(c.token),'Content-Type':'application/json'},
-        body:JSON.stringify(body)
+        body:JSON.stringify(bodyBase)
       });
-      const d=await r.json();
+      let d=await r.json();
       console.log(`[PUBLICAR-TODAS][${c.id}] respuesta ML status:`, r.status, JSON.stringify(d,null,2));
+
+      // Intento 2: si ML pide family_name → User Products (sin title, con family_name)
+      const needsFamilyName=(!r.ok||d.error)&&(
+        (d.causes||[]).some(cx=>(cx.message||'').toLowerCase().includes('family_name'))||
+        (d.message||'').toLowerCase().includes('family_name')
+      );
+      if(needsFamilyName){
+        console.log(`[PUBLICAR-TODAS][${c.id}] retry User Products con family_name: ${fn}`);
+        const bodyUP={...bodyBase, family_name:fn};
+        delete bodyUP.title;
+        r=await fetch(`${ML}/items`,{
+          method:'POST',
+          headers:{...hdr(c.token),'Content-Type':'application/json'},
+          body:JSON.stringify(bodyUP)
+        });
+        d=await r.json();
+        console.log(`[PUBLICAR-TODAS][${c.id}] retry respuesta:`, r.status, JSON.stringify(d,null,2));
+      }
+
       if(!r.ok||d.error){
         const msg=d.message||d.error||'Error ML';
         const causes=(d.causes||[]).map(cx=>cx.message||cx.code||'').filter(Boolean).join(' | ');
         const detail=causes?`${msg}: ${causes}`:msg;
         const isUnauth=r.status===401||r.status===403||(d.causes||[]).some(cx=>(cx.code||'').toString().includes('UNAUTHORIZED')||(cx.message||'').toLowerCase().includes('unauthorized'));
+        // Detectar atributos requeridos faltantes
+        const attrsFaltantes=(d.causes||[]).filter(cx=>(cx.code||'').includes('item.attribute')||(cx.message||'').includes('attribute')||cx.type==='invalid_value');
         return {cuenta:c.id,ok:false,error:isUnauth?`Token sin permisos — re-autenticá esta cuenta`:detail,causes:d.causes||[],status:r.status,unauthorized:isUnauth,ml_raw:d};
       }
       // Agregar descripción por separado
