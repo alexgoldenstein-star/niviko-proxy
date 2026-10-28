@@ -387,7 +387,7 @@ const costo = prod ? prod.ars*(item.quantity||1) : 0; // multiplicar por unidade
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'9.5',prods:PRODS.length,zones:Object.keys(ZONA).length}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'9.6',prods:PRODS.length,zones:Object.keys(ZONA).length,family_name_retry:true}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
