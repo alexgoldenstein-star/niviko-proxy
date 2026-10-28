@@ -1977,6 +1977,13 @@ app.post('/replicar/publicar',async(req,res)=>{
       catalog_listing_type_id:'NOT_ALLOWED', // evitar que ML lo enrolle en catálogo automáticamente
       attributes:limpiarAtributos(atributos),
     };
+    // family_name: ML lo exige en ciertas categorías (especialmente las que tienen variantes/catálogo).
+    // Se manda tanto como campo raíz como atributo para cubrir ambos casos.
+    body.family_name=titulo.substring(0,60);
+    const attrIds=(body.attributes||[]).map(a=>a.id.toUpperCase());
+    if(!attrIds.includes('FAMILY_NAME')){
+      body.attributes.push({id:'FAMILY_NAME',value_name:titulo.substring(0,60)});
+    }
     if(fotosValidas.length) body.pictures=fotosValidas.map(f=>({source:f.url||f}));
     // Sale terms: NO pasar sale_terms del vendedor original — causa errores
     // Solo pasar cuotas sin interés si se configuraron explícitamente
