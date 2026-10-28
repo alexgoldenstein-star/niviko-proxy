@@ -1991,7 +1991,21 @@ app.post('/replicar/publicar',async(req,res)=>{
       const causes=(d.causes||[]).map(c=>c.message||c.code||'').filter(Boolean).join(' | ');
       const detail=causes?`${msg}: ${causes}`:msg;
       const isUnauth=r.status===401||r.status===403||(d.causes||[]).some(c=>(c.code||'').toString().includes('UNAUTHORIZED')||(c.message||'').toLowerCase().includes('unauthorized'));
-      return res.json({ok:false,error:isUnauth?`Token sin permisos de escritura — re-autenticá la cuenta`:detail,causes:d.causes||[],status:r.status,unauthorized:isUnauth,ml_raw:d});
+      if(isUnauth) return res.json({ok:false,error:`Token sin permisos de escritura — re-autenticá la cuenta`,causes:d.causes||[],status:r.status,unauthorized:true,ml_raw:d});
+
+      // Si ML pide campos requeridos, consultar qué atributos faltan en la categoría
+      const isRequired=(d.causes||[]).some(c=>c.code==='body.required_fields'||c.type==='error');
+      if(isRequired && body.category_id){
+        try{
+          const catR=await fetch(`${ML}/categories/${body.category_id}/attributes`,{headers:hdr(token)});
+          const catAttrs=await catR.json();
+          const requeridos=(catAttrs||[]).filter(a=>a.tags?.required).map(a=>({id:a.id,name:a.name,values:(a.values||[]).slice(0,10).map(v=>({id:v.id,name:v.name}))}));
+          const enviados=(body.attributes||[]).map(a=>a.id);
+          const faltantes=requeridos.filter(a=>!enviados.includes(a.id));
+          return res.json({ok:false,error:detail,causes:d.causes||[],status:r.status,ml_raw:d,attrs_faltantes:faltantes,attrs_requeridos:requeridos});
+        }catch(e2){/* si falla la consulta de categoría, devolver error normal */}
+      }
+      return res.json({ok:false,error:detail,causes:d.causes||[],status:r.status,ml_raw:d});
     }
     // Item creado — ahora agregar descripción por separado (ML no acepta description en POST /items)
     if(descripcion){
