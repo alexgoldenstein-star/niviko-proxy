@@ -1960,7 +1960,7 @@ function limpiarAtributos(attrs){
 app.post('/replicar/publicar',async(req,res)=>{
   const token=req.headers['x-ml-token'];
   if(!token) return res.status(401).json({error:'Token requerido'});
-  const {titulo,categoria,precio,condicion,listing_type,stock,fotos,atributos,descripcion,garantia,envio,sale_terms,cuotas}=req.body;
+  const {titulo,categoria,precio,condicion,listing_type,stock,fotos,atributos,descripcion,garantia,envio,sale_terms,cuotas,family_name}=req.body;
   if(!titulo||!categoria||!precio) return res.status(400).json({error:'Faltan campos: titulo, categoria, precio'});
   try{
     // Construir body del item
@@ -2000,25 +2000,23 @@ app.post('/replicar/publicar',async(req,res)=>{
     }
     // NOTA: description NO va en el POST /items — se envía por separado después de crear
 
-    const postItem=async(bodyToSend)=>{
-      console.log('[PUBLICAR] body enviado a ML:', JSON.stringify(bodyToSend,null,2));
-      const r=await fetch(`${ML}/items`,{method:'POST',headers:{...hdr(token),'Content-Type':'application/json'},body:JSON.stringify(bodyToSend)});
-      const d=await r.json();
-      console.log('[PUBLICAR] respuesta ML status:', r.status, JSON.stringify(d,null,2));
-      return {r,d};
-    };
+    // Si ML exige family_name (modelo User Products), mandarlo sin title
+    const fn=family_name||titulo.substring(0,60);
+    const needsUserProducts=false; // se detecta en el primer intento
+    // Intento 1: legacy con title
+    console.log('[PUBLICAR] body legacy:', JSON.stringify(body,null,2));
+    let r=await fetch(`${ML}/items`,{method:'POST',headers:{...hdr(token),'Content-Type':'application/json'},body:JSON.stringify(body)});
+    let d=await r.json();
+    console.log('[PUBLICAR] respuesta:', r.status, JSON.stringify(d,null,2));
 
-    let {r,d}=await postItem(body);
-
-    // Si falla con family_name → la categoría es User Products. Reintentar sin "title", con "family_name".
-    const needsFamilyName=(d.causes||[]).some(c=>c.message&&c.message.includes('family_name'));
-    if((!r.ok||d.error) && needsFamilyName){
-      console.log('[PUBLICAR] Reintentando con modelo User Products (family_name)...');
-      const bodyUP={...body};
+    // Si falla con family_name → reintentar con modelo User Products (sin title, con family_name)
+    if((!r.ok||d.error) && (d.causes||[]).some(c=>(c.message||'').includes('family_name'))){
+      console.log('[PUBLICAR] retry User Products con family_name:', fn);
+      const bodyUP={...body, family_name:fn};
       delete bodyUP.title;
-      bodyUP.family_name=titulo.substring(0,60);
-      const retry=await postItem(bodyUP);
-      r=retry.r; d=retry.d;
+      r=await fetch(`${ML}/items`,{method:'POST',headers:{...hdr(token),'Content-Type':'application/json'},body:JSON.stringify(bodyUP)});
+      d=await r.json();
+      console.log('[PUBLICAR] retry respuesta:', r.status, JSON.stringify(d,null,2));
     }
 
     if(!r.ok||d.error){
