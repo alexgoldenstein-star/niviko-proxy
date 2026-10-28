@@ -1934,7 +1934,7 @@ function limpiarAtributos(attrs){
   // IDs que ML rechaza al crear un item nuevo desde cero
   // (son del vendedor original, internos de ML, o de catálogo)
   const SKIP_IDS=new Set([
-    'SELLER_SKU','ITEM_CONDITION','EAN',
+    'ITEM_CONDITION','EAN',
     'ALPHANUMERIC_MODEL','SELLER_ID','ITEM_ID',
     'CATALOG_PRODUCT_ID','CATALOG_LISTING_TYPE_ID',
     'FAMILY_NAME','family_name',
