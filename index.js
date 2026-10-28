@@ -1965,7 +1965,16 @@ app.post('/replicar/publicar',async(req,res)=>{
   try{
     // Construir body del item
     const fotosValidas=(fotos||[]).filter(f=>(f.url||f||'').toString().startsWith('http'));
-    const body={
+    const attrsLimpios=limpiarAtributos(atributos);
+    if(fotosValidas.length===0) fotosValidas.push(...(fotos||[]).filter(f=>f.url).map(f=>f)); // fallback
+
+    // Intentar publicación. ML tiene dos modelos:
+    // 1) Legacy: usa "title", sin "family_name"
+    // 2) User Products: usa "family_name", sin "title"
+    // Algunas categorías SOLO aceptan User Products y exigen family_name.
+    // Estrategia: intentar legacy primero; si falla con family_name, reintentar con User Products.
+
+    const bodyLegacy={
       title:titulo,
       category_id:categoria,
       price:parseFloat(precio),
@@ -1973,18 +1982,12 @@ app.post('/replicar/publicar',async(req,res)=>{
       available_quantity:parseInt(stock)||1,
       buying_mode:'buy_it_now',
       condition:condicion||'new',
-      listing_type_id:'gold_special', // siempre clásico — catálogo requiere family_name que no podemos setear
-      catalog_listing_type_id:'NOT_ALLOWED', // evitar que ML lo enrolle en catálogo automáticamente
-      attributes:limpiarAtributos(atributos),
+      listing_type_id:'gold_special',
+      attributes:attrsLimpios,
     };
-    // family_name: ML lo exige en ciertas categorías (especialmente las que tienen variantes/catálogo).
-    // Se manda tanto como campo raíz como atributo para cubrir ambos casos.
-    body.family_name=titulo.substring(0,60);
-    const attrIds=(body.attributes||[]).map(a=>a.id.toUpperCase());
-    if(!attrIds.includes('FAMILY_NAME')){
-      body.attributes.push({id:'FAMILY_NAME',value_name:titulo.substring(0,60)});
-    }
-    if(fotosValidas.length) body.pictures=fotosValidas.map(f=>({source:f.url||f}));
+    if(fotosValidas.length) bodyLegacy.pictures=fotosValidas.map(f=>({source:f.url||f}));
+
+    const body=bodyLegacy; // empezar con legacy
     // Sale terms: NO pasar sale_terms del vendedor original — causa errores
     // Solo pasar cuotas sin interés si se configuraron explícitamente
     const saleTermsCuotas=(sale_terms||[]).filter(t=>t.id==='INSTALLMENTS');
@@ -1997,33 +2000,33 @@ app.post('/replicar/publicar',async(req,res)=>{
     }
     // NOTA: description NO va en el POST /items — se envía por separado después de crear
 
-    console.log('[PUBLICAR] body enviado a ML:', JSON.stringify(body,null,2));
-    const r=await fetch(`${ML}/items`,{
-      method:'POST',
-      headers:{...hdr(token),'Content-Type':'application/json'},
-      body:JSON.stringify(body)
-    });
-    const d=await r.json();
-    console.log('[PUBLICAR] respuesta ML status:', r.status, JSON.stringify(d,null,2));
+    const postItem=async(bodyToSend)=>{
+      console.log('[PUBLICAR] body enviado a ML:', JSON.stringify(bodyToSend,null,2));
+      const r=await fetch(`${ML}/items`,{method:'POST',headers:{...hdr(token),'Content-Type':'application/json'},body:JSON.stringify(bodyToSend)});
+      const d=await r.json();
+      console.log('[PUBLICAR] respuesta ML status:', r.status, JSON.stringify(d,null,2));
+      return {r,d};
+    };
+
+    let {r,d}=await postItem(body);
+
+    // Si falla con family_name → la categoría es User Products. Reintentar sin "title", con "family_name".
+    const needsFamilyName=(d.causes||[]).some(c=>c.message&&c.message.includes('family_name'));
+    if((!r.ok||d.error) && needsFamilyName){
+      console.log('[PUBLICAR] Reintentando con modelo User Products (family_name)...');
+      const bodyUP={...body};
+      delete bodyUP.title;
+      bodyUP.family_name=titulo.substring(0,60);
+      const retry=await postItem(bodyUP);
+      r=retry.r; d=retry.d;
+    }
+
     if(!r.ok||d.error){
       const msg=d.message||d.error||'Error ML';
       const causes=(d.causes||[]).map(c=>c.message||c.code||'').filter(Boolean).join(' | ');
       const detail=causes?`${msg}: ${causes}`:msg;
       const isUnauth=r.status===401||r.status===403||(d.causes||[]).some(c=>(c.code||'').toString().includes('UNAUTHORIZED')||(c.message||'').toLowerCase().includes('unauthorized'));
       if(isUnauth) return res.json({ok:false,error:`Token sin permisos de escritura — re-autenticá la cuenta`,causes:d.causes||[],status:r.status,unauthorized:true,ml_raw:d});
-
-      // Si ML pide campos requeridos, consultar qué atributos faltan en la categoría
-      const isRequired=(d.causes||[]).some(c=>c.code==='body.required_fields'||c.type==='error');
-      if(isRequired && body.category_id){
-        try{
-          const catR=await fetch(`${ML}/categories/${body.category_id}/attributes`,{headers:hdr(token)});
-          const catAttrs=await catR.json();
-          const requeridos=(catAttrs||[]).filter(a=>a.tags?.required).map(a=>({id:a.id,name:a.name,values:(a.values||[]).slice(0,10).map(v=>({id:v.id,name:v.name}))}));
-          const enviados=(body.attributes||[]).map(a=>a.id);
-          const faltantes=requeridos.filter(a=>!enviados.includes(a.id));
-          return res.json({ok:false,error:detail,causes:d.causes||[],status:r.status,ml_raw:d,attrs_faltantes:faltantes,attrs_requeridos:requeridos});
-        }catch(e2){/* si falla la consulta de categoría, devolver error normal */}
-      }
       return res.json({ok:false,error:detail,causes:d.causes||[],status:r.status,ml_raw:d});
     }
     // Item creado — ahora agregar descripción por separado (ML no acepta description en POST /items)
