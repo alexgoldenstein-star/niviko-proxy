@@ -1973,7 +1973,8 @@ app.post('/replicar/publicar',async(req,res)=>{
       available_quantity:parseInt(stock)||1,
       buying_mode:'buy_it_now',
       condition:condicion||'new',
-      listing_type_id:listing_type||'gold_special',
+      listing_type_id:'gold_special', // siempre clásico — catálogo requiere family_name que no podemos setear
+      catalog_listing_type_id:'NOT_ALLOWED', // evitar que ML lo enrolle en catálogo automáticamente
       attributes:limpiarAtributos(atributos),
     };
     if(fotosValidas.length) body.pictures=fotosValidas.map(f=>({source:f.url||f}));
