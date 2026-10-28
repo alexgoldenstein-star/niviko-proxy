@@ -1934,7 +1934,7 @@ function limpiarAtributos(attrs){
   // IDs que ML rechaza al crear un item nuevo desde cero
   // (son del vendedor original, internos de ML, o de catálogo)
   const SKIP_IDS=new Set([
-    'SELLER_SKU','ITEM_CONDITION','GTIN','EAN',
+    'SELLER_SKU','ITEM_CONDITION','EAN',
     'ALPHANUMERIC_MODEL','SELLER_ID','ITEM_ID',
     'CATALOG_PRODUCT_ID','CATALOG_LISTING_TYPE_ID',
     'FAMILY_NAME','family_name',
@@ -1992,8 +1992,7 @@ app.post('/replicar/publicar',async(req,res)=>{
     // Solo pasar cuotas sin interés si se configuraron explícitamente
     const saleTermsCuotas=(sale_terms||[]).filter(t=>t.id==='INSTALLMENTS');
     if(saleTermsCuotas.length) body.sale_terms=saleTermsCuotas;
-    // Garantía: solo si es texto simple
-    if(garantia&&typeof garantia==='string'&&garantia.length<200) body.warranty=garantia;
+    // Garantía: NO enviar warranty — es deprecated en categorías User Products y causa error 400
     // Envío: solo modo básico, sin datos del vendedor anterior
     if(envio?.mode&&envio.mode!=='not_specified'){
       body.shipping={mode:envio.mode,free_shipping:!!envio.free_shipping};
@@ -2066,7 +2065,7 @@ app.post('/replicar/publicar-todas',async(req,res)=>{
       };
       if(fotosValidas.length) bodyBase.pictures=fotosValidas.map(f=>({source:f.url||f}));
       if(override.sale_terms?.length) bodyBase.sale_terms=override.sale_terms;
-      if(item.garantia) bodyBase.warranty=item.garantia;
+      // warranty: NO enviar — deprecated en categorías User Products
       if(item.envio?.mode) bodyBase.shipping={mode:item.envio.mode,free_shipping:item.envio.free_shipping||false};
       // NOTA: description NO va en el POST /items — se envía por separado
 
