@@ -1755,8 +1755,9 @@ app.post('/fulljaus/producto', async(req,res)=>{
     if(b.depth!=null&&b.depth!=='')   body.depth  = parseFloat(b.depth);
     if(b.category_branch)  body.categoryBranch = b.category_branch;
     // Precios separados: lista (tachado) y base (venta real)
+    // Fulljaus acepta listPrice (tachado) pero NO basePrice — price ya es el precio de venta
     if(b.price_list!=null&&b.price_list!=='')  body.listPrice  = parseFloat(b.price_list);
-    if(b.price_base!=null&&b.price_base!=='')  body.basePrice  = parseFloat(b.price_base);
+    if(b.price_base!=null&&b.price_base!=='')  body.price      = parseFloat(b.price_base); // sobreescribe price con precio base
     if(b.list_price)       body.listPrice = parseFloat(b.list_price); // compat vieja
     if(b.cost)             body.cost = parseFloat(b.cost);
     if(b.taxes!=null)      body.taxes = parseFloat(b.taxes); // alícuota IVA: 21 o 10.5
