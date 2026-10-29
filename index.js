@@ -1749,21 +1749,33 @@ app.post('/fulljaus/producto', async(req,res)=>{
     if(b.model)            body.model = b.model;
     if(b.description)      body.description = b.description;
     if(b.short_description)body.shortDescription = b.short_description;
-    if(b.weight)           body.weight = parseFloat(b.weight);
-    if(b.height)           body.height = parseFloat(b.height);
-    if(b.width)            body.width  = parseFloat(b.width);
-    if(b.depth)            body.depth  = parseFloat(b.depth);
+    if(b.weight!=null&&b.weight!=='') body.weight = parseFloat(b.weight);
+    if(b.height!=null&&b.height!=='') body.height = parseFloat(b.height);
+    if(b.width!=null&&b.width!=='')   body.width  = parseFloat(b.width);
+    if(b.depth!=null&&b.depth!=='')   body.depth  = parseFloat(b.depth);
     if(b.category_branch)  body.categoryBranch = b.category_branch;
     if(b.list_price)       body.listPrice = parseFloat(b.list_price);
     if(b.cost)             body.cost = parseFloat(b.cost);
+    if(b.taxes!=null)      body.taxes = parseFloat(b.taxes); // alícuota IVA: 21 o 10.5
 
     // Intentar PUT primero (actualizar si ya existe), luego POST (crear)
     const putR = await fetch(`${FJ_BASE}/products/${encodeURIComponent(b.sku)}`, {
       method:'PUT', headers:fjHdr(), body:JSON.stringify(body)
     });
     if(putR.ok || putR.status===200){
-      const d = await putR.json();
-      return res.json({ok:true, action:'updated', sku:b.sku, data:d});
+      const putD = await putR.json();
+      // Subir imágenes si vinieron
+      const fotos = b.fotos||[];
+      const imgResults = [];
+      for(let i=0;i<fotos.length;i++){
+        const url = typeof fotos[i]==='string' ? fotos[i] : fotos[i].url||fotos[i].secure_url||'';
+        if(!url) continue;
+        const ir = await fetch(`${FJ_BASE}/products/${encodeURIComponent(b.sku)}/images`,{
+          method:'POST', headers:fjHdr(), body:JSON.stringify({url, position:i})
+        });
+        imgResults.push({url, ok:ir.ok, status:ir.status});
+      }
+      return res.json({ok:true, action:'updated', sku:b.sku, data:putD, imagenes:imgResults});
     }
 
     // Si 404 (no existe) → crear con POST
@@ -1773,7 +1785,18 @@ app.post('/fulljaus/producto', async(req,res)=>{
       });
       const d = await postR.json();
       if(!postR.ok) return res.json({ok:false, error:d.message||d.error||`HTTP ${postR.status}`, detail:d});
-      return res.json({ok:true, action:'created', sku:b.sku, data:d});
+      // Subir imágenes después de crear
+      const fotos = b.fotos||[];
+      const imgResults = [];
+      for(let i=0;i<fotos.length;i++){
+        const url = typeof fotos[i]==='string' ? fotos[i] : fotos[i].url||fotos[i].secure_url||'';
+        if(!url) continue;
+        const ir = await fetch(`${FJ_BASE}/products/${encodeURIComponent(b.sku)}/images`,{
+          method:'POST', headers:fjHdr(), body:JSON.stringify({url, position:i})
+        });
+        imgResults.push({url, ok:ir.ok, status:ir.status});
+      }
+      return res.json({ok:true, action:'created', sku:b.sku, data:d, imagenes:imgResults});
     }
 
     const errD = await putR.json().catch(()=>({error:`HTTP ${putR.status}`}));
@@ -2688,7 +2711,7 @@ app.get('/catalogos/items',async(req,res)=>{
 });
 
 app.get('/version',(req,res)=>res.json({
-  version:'12.0',
+  version:'12.1',
   iva_formula:'venta - venta/(1+ivaPct)',
   iibb_formula:'ventaSinIva * 0.04',
   anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
