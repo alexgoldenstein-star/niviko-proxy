@@ -1761,23 +1761,28 @@ app.post('/fulljaus/producto', async(req,res)=>{
     if(b.list_price)       body.listPrice = parseFloat(b.list_price); // compat vieja
     if(b.cost)             body.cost = parseFloat(b.cost);
     if(b.taxes!=null)      body.taxes = parseFloat(b.taxes); // alícuota IVA: 21 o 10.5
-    // Datos adicionales fijos
-    if(b.product_type)              body.productType             = b.product_type;
-    if(b.sale_mode)                 body.saleMode                = b.sale_mode;
-    if(b.inventory_classification)  body.inventoryClassification = b.inventory_classification;
-    if(b.packaging_type)            body.packagingType           = b.packaging_type;
+    // Datos adicionales — solo los que Fulljaus confirma que acepta
+    // (productType, saleMode, etc. desactivados hasta confirmar soporte)
+    // if(b.product_type)              body.productType             = b.product_type;
+    // if(b.sale_mode)                 body.saleMode                = b.sale_mode;
+    // if(b.inventory_classification)  body.inventoryClassification = b.inventory_classification;
+    // if(b.packaging_type)            body.packagingType           = b.packaging_type;
     if(b.manufacturer)              body.manufacturer            = b.manufacturer;
-    if(b.supplier_name)             body.supplierName            = b.supplier_name;
-    if(b.country_of_origin)         body.countryOfOrigin         = b.country_of_origin;
-    if(b.warranty_type)             body.warrantyType            = b.warranty_type;
-    if(b.units_per_package)         body.unitsPerPackage         = String(b.units_per_package);
+    // if(b.supplier_name)             body.supplierName            = b.supplier_name;
+    // if(b.country_of_origin)         body.countryOfOrigin         = b.country_of_origin;
+    // if(b.warranty_type)             body.warrantyType            = b.warranty_type;
+    // if(b.units_per_package)         body.unitsPerPackage         = String(b.units_per_package);
+
+    console.log('[fulljaus] body a enviar:', JSON.stringify(body));
 
     // Intentar PUT primero (actualizar si ya existe), luego POST (crear)
     const putR = await fetch(`${FJ_BASE}/products/${encodeURIComponent(b.sku)}`, {
       method:'PUT', headers:fjHdr(), body:JSON.stringify(body)
     });
+    const putRaw = await putR.text();
+    console.log('[fulljaus] PUT status:', putR.status, 'body:', putRaw.slice(0,500));
     if(putR.ok || putR.status===200){
-      const putD = await putR.json();
+      const putD = JSON.parse(putRaw);
       // Subir imágenes si vinieron
       const fotos = b.fotos||[];
       const imgResults = [];
@@ -1797,7 +1802,9 @@ app.post('/fulljaus/producto', async(req,res)=>{
       const postR = await fetch(`${FJ_BASE}/products`, {
         method:'POST', headers:fjHdr(), body:JSON.stringify(body)
       });
-      const d = await postR.json();
+      const postRaw = await postR.text();
+      console.log('[fulljaus] POST status:', postR.status, 'body:', postRaw.slice(0,500));
+      const d = JSON.parse(postRaw);
       if(!postR.ok) return res.json({ok:false, error:d.message||d.error||`HTTP ${postR.status}`, detail:d});
       // Subir imágenes después de crear
       const fotos = b.fotos||[];
