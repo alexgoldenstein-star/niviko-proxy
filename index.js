@@ -1775,56 +1775,62 @@ app.post('/fulljaus/producto', async(req,res)=>{
 
     console.log('[fulljaus] body a enviar:', JSON.stringify(body));
 
-    // Intentar POST primero — Fulljaus maneja upsert por SKU
-    // (el PUT devuelve 503 HTML cuando el producto existe, así que evitamos PUT)
-    const putR = await fetch(`${FJ_BASE}/products`, {
-      method:'POST', headers:fjHdr(), body:JSON.stringify(body)
-    });
-    const putRaw = await putR.text();
-    console.log('[fulljaus] POST(upsert) status:', putR.status, 'body:', putRaw.slice(0,500));
-    if(putR.ok || putR.status===200){
-      const putD = JSON.parse(putRaw);
-      // Subir imágenes si vinieron
-      const fotos = b.fotos||[];
+    // Helper para subir imágenes después de crear/actualizar
+    async function subirImagenes(sku, fotos){
       const imgResults = [];
       for(let i=0;i<fotos.length;i++){
         const url = typeof fotos[i]==='string' ? fotos[i] : fotos[i].url||fotos[i].secure_url||'';
         if(!url) continue;
-        const ir = await fetch(`${FJ_BASE}/products/${encodeURIComponent(b.sku)}/images`,{
+        const ir = await fetch(`${FJ_BASE}/products/${encodeURIComponent(sku)}/images`,{
           method:'POST', headers:fjHdr(), body:JSON.stringify({url, position:i})
         });
         const irTxt = await ir.text();
         console.log('[fulljaus] img POST status:', ir.status, 'url:', url.slice(0,80), 'resp:', irTxt.slice(0,200));
         imgResults.push({url, ok:ir.ok, status:ir.status, resp:irTxt.slice(0,200)});
       }
+      return imgResults;
+    }
+
+    // Intentar POST (crear nuevo)
+    const postR = await fetch(`${FJ_BASE}/products`, {
+      method:'POST', headers:fjHdr(), body:JSON.stringify(body)
+    });
+    const postRaw = await postR.text();
+    console.log('[fulljaus] POST status:', postR.status, 'body:', postRaw.slice(0,500));
+
+    if(postR.ok){
+      const postD = JSON.parse(postRaw);
+      const imgResults = await subirImagenes(b.sku, b.fotos||[]);
+      return res.json({ok:true, action:'created', sku:b.sku, data:postD, imagenes:imgResults});
+    }
+
+    // Si ya existe (SKU duplicado) → actualizar con PUT
+    let postErr = {};
+    try{ postErr = JSON.parse(postRaw); }catch(e){}
+    const skuDuplicado = (postErr.error||postErr.message||'').toLowerCase().includes('mismo sku') ||
+                         (postErr.error||postErr.message||'').toLowerCase().includes('duplicate') ||
+                         postR.status === 409;
+
+    if(skuDuplicado || postR.status === 500){
+      console.log('[fulljaus] SKU existe, intentando PUT para actualizar...');
+      const putR = await fetch(`${FJ_BASE}/products/${encodeURIComponent(b.sku)}`, {
+        method:'PUT', headers:fjHdr(), body:JSON.stringify(body)
+      });
+      const putRaw = await putR.text();
+      console.log('[fulljaus] PUT status:', putR.status, 'body:', putRaw.slice(0,500));
+      // Si el PUT devuelve HTML (503 de Fulljaus) lo detectamos
+      if(putRaw.trim().startsWith('<')){
+        console.log('[fulljaus] PUT devolvió HTML — Fulljaus no soporta actualizar este producto');
+        return res.json({ok:false, error:'El producto existe en Fulljaus pero no se puede actualizar (PUT devolvió error HTML). Puede que esté en estado inactivo/borrado en el panel de Fulljaus.', sku:b.sku});
+      }
+      let putD = {};
+      try{ putD = JSON.parse(putRaw); }catch(e){}
+      if(!putR.ok) return res.json({ok:false, error:putD.message||putD.error||`HTTP ${putR.status}`, detail:putD});
+      const imgResults = await subirImagenes(b.sku, b.fotos||[]);
       return res.json({ok:true, action:'updated', sku:b.sku, data:putD, imagenes:imgResults});
     }
 
-    // Fallback — no debería llegar acá con upsert por POST
-    if(putR.status===404||putR.status===400||putR.status===503){
-      const postR = await fetch(`${FJ_BASE}/products`, {
-        method:'POST', headers:fjHdr(), body:JSON.stringify(body)
-      });
-      const postRaw = await postR.text();
-      console.log('[fulljaus] POST(retry) status:', postR.status, 'body:', postRaw.slice(0,500));
-      const d = JSON.parse(postRaw);
-      if(!postR.ok) return res.json({ok:false, error:d.message||d.error||`HTTP ${postR.status}`, detail:d});
-      // Subir imágenes después de crear
-      const fotos = b.fotos||[];
-      const imgResults = [];
-      for(let i=0;i<fotos.length;i++){
-        const url = typeof fotos[i]==='string' ? fotos[i] : fotos[i].url||fotos[i].secure_url||'';
-        if(!url) continue;
-        const ir = await fetch(`${FJ_BASE}/products/${encodeURIComponent(b.sku)}/images`,{
-          method:'POST', headers:fjHdr(), body:JSON.stringify({url, position:i})
-        });
-        imgResults.push({url, ok:ir.ok, status:ir.status});
-      }
-      return res.json({ok:true, action:'created', sku:b.sku, data:d, imagenes:imgResults});
-    }
-
-    const errD = JSON.parse(putRaw||'{}');
-    res.json({ok:false, error:errD.message||errD.error||`HTTP ${putR.status}`, detail:errD});
+    res.json({ok:false, error:postErr.message||postErr.error||`HTTP ${postR.status}`, detail:postErr});
   }catch(e){res.status(500).json({ok:false, error:e.message});}
 });
 
