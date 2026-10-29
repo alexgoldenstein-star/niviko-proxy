@@ -2033,6 +2033,7 @@ app.get('/replicar/item/:id',async(req,res)=>{
       titulo:itemR.title,
       categoria:itemR.category_id,
       precio:itemR.price,
+      precio_original:itemR.original_price||null,  // precio antes de promo activa
       moneda:itemR.currency_id||'ARS',
       condicion:itemR.condition||'new',
       listing_type:itemR.listing_type_id||'gold_special',
