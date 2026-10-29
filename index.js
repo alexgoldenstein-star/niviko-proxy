@@ -1754,9 +1754,22 @@ app.post('/fulljaus/producto', async(req,res)=>{
     if(b.width!=null&&b.width!=='')   body.width  = parseFloat(b.width);
     if(b.depth!=null&&b.depth!=='')   body.depth  = parseFloat(b.depth);
     if(b.category_branch)  body.categoryBranch = b.category_branch;
-    if(b.list_price)       body.listPrice = parseFloat(b.list_price);
+    // Precios separados: lista (tachado) y base (venta real)
+    if(b.price_list!=null&&b.price_list!=='')  body.listPrice  = parseFloat(b.price_list);
+    if(b.price_base!=null&&b.price_base!=='')  body.basePrice  = parseFloat(b.price_base);
+    if(b.list_price)       body.listPrice = parseFloat(b.list_price); // compat vieja
     if(b.cost)             body.cost = parseFloat(b.cost);
     if(b.taxes!=null)      body.taxes = parseFloat(b.taxes); // alícuota IVA: 21 o 10.5
+    // Datos adicionales fijos
+    if(b.product_type)              body.productType             = b.product_type;
+    if(b.sale_mode)                 body.saleMode                = b.sale_mode;
+    if(b.inventory_classification)  body.inventoryClassification = b.inventory_classification;
+    if(b.packaging_type)            body.packagingType           = b.packaging_type;
+    if(b.manufacturer)              body.manufacturer            = b.manufacturer;
+    if(b.supplier_name)             body.supplierName            = b.supplier_name;
+    if(b.country_of_origin)         body.countryOfOrigin         = b.country_of_origin;
+    if(b.warranty_type)             body.warrantyType            = b.warranty_type;
+    if(b.units_per_package)         body.unitsPerPackage         = String(b.units_per_package);
 
     // Intentar PUT primero (actualizar si ya existe), luego POST (crear)
     const putR = await fetch(`${FJ_BASE}/products/${encodeURIComponent(b.sku)}`, {
@@ -1818,6 +1831,24 @@ app.put('/fulljaus/stock', async(req,res)=>{
     const d = await r.json();
     if(!r.ok) return res.json({ok:false, error:d.message||d.error||`HTTP ${r.status}`});
     res.json({ok:true, sku, stock: parseInt(stock||0), data:d});
+  }catch(e){res.status(500).json({ok:false, error:e.message});}
+});
+
+// GET /fulljaus/categorias — listar categorías disponibles en Fulljaus
+app.get('/fulljaus/categorias', async(req,res)=>{
+  if(!FJ_TOKEN) return res.status(500).json({ok:false, error:'FULLJAUS_TOKEN no configurado'});
+  try{
+    // Intentar varios endpoints posibles de categorías
+    const endpoints=['/categories','/product-categories','/category-branches','/catalog/categories'];
+    for(const ep of endpoints){
+      const r=await fetch(`${FJ_BASE}${ep}`,{headers:fjHdr()});
+      if(r.ok){
+        const d=await r.json();
+        return res.json({ok:true, endpoint:ep, data:d});
+      }
+    }
+    // Si ninguno funciona devolver 404 con info
+    res.json({ok:false, error:'No se encontró endpoint de categorías en Fulljaus. Intentados: '+endpoints.join(', ')});
   }catch(e){res.status(500).json({ok:false, error:e.message});}
 });
 
