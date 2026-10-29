@@ -2190,11 +2190,37 @@ app.post('/replicar/publicar',async(req,res)=>{
 
     if(!r.ok||d.error){
       const msg=d.message||d.error||'Error ML';
-      const causes=(d.causes||[]).map(c=>c.message||c.code||'').filter(Boolean).join(' | ');
-      const detail=causes?`${msg}: ${causes}`:msg;
-      const isUnauth=r.status===401||r.status===403||(d.causes||[]).some(c=>(c.code||'').toString().includes('UNAUTHORIZED')||(c.message||'').toLowerCase().includes('unauthorized'));
-      if(isUnauth) return res.json({ok:false,error:`Token sin permisos de escritura — re-autenticá la cuenta`,causes:d.causes||[],status:r.status,unauthorized:true,ml_raw:d});
-      return res.json({ok:false,error:detail,causes:d.causes||[],status:r.status,ml_raw:d});
+      const causes=(d.causes||d.cause||[]);
+      const causesMsg=causes.map(c=>c.message||c.code||'').filter(Boolean).join(' | ');
+      const detail=causesMsg?`${msg}: ${causesMsg}`:msg;
+      const isUnauth=r.status===401||r.status===403||causes.some(c=>(c.code||'').toString().includes('UNAUTHORIZED')||(c.message||'').toLowerCase().includes('unauthorized'));
+      if(isUnauth) return res.json({ok:false,error:`Token sin permisos de escritura — re-autenticá la cuenta`,causes,status:r.status,unauthorized:true,ml_raw:d});
+
+      // Detectar atributos condicionales requeridos (ej: VALUE_ADDED_TAX)
+      const missingAttrs=causes.filter(c=>c.code==='item.attribute.missing_conditional_required'||(c.message||'').toLowerCase().includes('required for category'));
+      if(missingAttrs.length){
+        // Buscar qué atributos específicos faltan del mensaje
+        // ML dice: "The attributes [VALUE_ADDED_TAX] are required"
+        const attrIds=[];
+        missingAttrs.forEach(c=>{
+          const m=(c.message||'').match(/\[([A-Z_,\s]+)\]/);
+          if(m) m[1].split(',').map(s=>s.trim()).forEach(id=>{if(id) attrIds.push(id);});
+        });
+        // Buscar valores posibles consultando ML
+        const attrsInfo=await Promise.all(attrIds.map(async attrId=>{
+          try{
+            const ar=await fetch(`${ML}/categories/${categoria}/attributes`,{headers:{'Authorization':`Bearer ${token}`}});
+            if(!ar.ok) return {id:attrId,name:attrId,values:[]};
+            const attrs=await ar.json();
+            const found=attrs.find(a=>a.id===attrId);
+            if(!found) return {id:attrId,name:attrId,values:[]};
+            return {id:attrId,name:found.name||attrId,values:(found.values||[]).map(v=>({id:v.id,name:v.name}))};
+          }catch(e){return {id:attrId,name:attrId,values:[]};}
+        }));
+        return res.json({ok:false,error:`Faltan atributos requeridos para esta categoría`,causes,status:r.status,ml_raw:d,attrs_faltantes:attrsInfo});
+      }
+
+      return res.json({ok:false,error:detail,causes,status:r.status,ml_raw:d});
     }
     // Item creado — ahora agregar descripción por separado (ML no acepta description en POST /items)
     if(descripcion){
