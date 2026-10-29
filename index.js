@@ -1713,6 +1713,102 @@ function normalizeFJOrder(o){
   };
 }
 
+// ── FULLJAUS: Publicar/actualizar producto ────────────────────────────────────
+// POST /fulljaus/producto  { sku, title, price, stock, ean, brand, condition,
+//                           warranty_months, description, weight, height, width,
+//                           depth, category_branch }
+app.post('/fulljaus/producto', async(req,res)=>{
+  if(!FJ_TOKEN) return res.status(500).json({ok:false, error:'FULLJAUS_TOKEN no configurado en Vercel'});
+  try{
+    const b = req.body;
+    if(!b.sku) return res.status(400).json({ok:false, error:'sku requerido'});
+
+    // Mapear warranty: si viene texto (ej "12 meses") extraer número, o 0 si "Sin garantía"
+    let warrantyMonths = 0;
+    if(b.warranty_months !== undefined){
+      warrantyMonths = parseInt(b.warranty_months)||0;
+    } else if(b.warranty_text){
+      const m = String(b.warranty_text).match(/(\d+)\s*(mes|month)/i);
+      const y = String(b.warranty_text).match(/(\d+)\s*(año|year)/i);
+      if(m) warrantyMonths = parseInt(m[1]);
+      else if(y) warrantyMonths = parseInt(y[1])*12;
+    }
+
+    const body = {
+      sku:           String(b.sku),
+      title:         b.title||b.name||'',
+      name:          b.title||b.name||'',
+      price:         parseFloat(b.price||0),
+      stock:         parseInt(b.stock||0),
+      active:        b.active !== false,
+      condition:     (b.condition||'NEW').toUpperCase().replace('new','NEW').replace('used','USED'),
+      warranty:      warrantyMonths,
+    };
+    if(b.ean)              body.ean = String(b.ean);
+    if(b.brand)            body.brand = b.brand;
+    if(b.model)            body.model = b.model;
+    if(b.description)      body.description = b.description;
+    if(b.short_description)body.shortDescription = b.short_description;
+    if(b.weight)           body.weight = parseFloat(b.weight);
+    if(b.height)           body.height = parseFloat(b.height);
+    if(b.width)            body.width  = parseFloat(b.width);
+    if(b.depth)            body.depth  = parseFloat(b.depth);
+    if(b.category_branch)  body.categoryBranch = b.category_branch;
+    if(b.list_price)       body.listPrice = parseFloat(b.list_price);
+    if(b.cost)             body.cost = parseFloat(b.cost);
+
+    // Intentar PUT primero (actualizar si ya existe), luego POST (crear)
+    const putR = await fetch(`${FJ_BASE}/products/${encodeURIComponent(b.sku)}`, {
+      method:'PUT', headers:fjHdr(), body:JSON.stringify(body)
+    });
+    if(putR.ok || putR.status===200){
+      const d = await putR.json();
+      return res.json({ok:true, action:'updated', sku:b.sku, data:d});
+    }
+
+    // Si 404 (no existe) → crear con POST
+    if(putR.status===404||putR.status===400){
+      const postR = await fetch(`${FJ_BASE}/products`, {
+        method:'POST', headers:fjHdr(), body:JSON.stringify(body)
+      });
+      const d = await postR.json();
+      if(!postR.ok) return res.json({ok:false, error:d.message||d.error||`HTTP ${postR.status}`, detail:d});
+      return res.json({ok:true, action:'created', sku:b.sku, data:d});
+    }
+
+    const errD = await putR.json().catch(()=>({error:`HTTP ${putR.status}`}));
+    res.json({ok:false, error:errD.message||errD.error||`HTTP ${putR.status}`, detail:errD});
+  }catch(e){res.status(500).json({ok:false, error:e.message});}
+});
+
+// PUT /fulljaus/stock { sku, stock }  — actualizar solo el stock
+app.put('/fulljaus/stock', async(req,res)=>{
+  if(!FJ_TOKEN) return res.status(500).json({ok:false, error:'FULLJAUS_TOKEN no configurado en Vercel'});
+  try{
+    const {sku, stock} = req.body;
+    if(!sku) return res.status(400).json({ok:false, error:'sku requerido'});
+    const r = await fetch(`${FJ_BASE}/products/${encodeURIComponent(sku)}`, {
+      method:'PUT',
+      headers: fjHdr(),
+      body: JSON.stringify({sku, stock: parseInt(stock||0)})
+    });
+    const d = await r.json();
+    if(!r.ok) return res.json({ok:false, error:d.message||d.error||`HTTP ${r.status}`});
+    res.json({ok:true, sku, stock: parseInt(stock||0), data:d});
+  }catch(e){res.status(500).json({ok:false, error:e.message});}
+});
+
+// GET /fulljaus/producto/:sku — consultar producto en Fulljaus
+app.get('/fulljaus/producto/:sku', async(req,res)=>{
+  if(!FJ_TOKEN) return res.status(500).json({ok:false, error:'FULLJAUS_TOKEN no configurado en Vercel'});
+  try{
+    const r = await fetch(`${FJ_BASE}/products/${encodeURIComponent(req.params.sku)}`, {headers:fjHdr()});
+    const d = await r.json();
+    if(!r.ok) return res.json({ok:false, error:d.message||d.error||`HTTP ${r.status}`, existe:false});
+    res.json({ok:true, existe:true, producto: d.result||d});
+  }catch(e){res.status(500).json({ok:false, error:e.message});}
+});
+
 // ── REPLICAR: buscar publicaciones por SKU, título o número ─────────────────
 // GET /replicar/buscar?q=...&seller_id=...
 app.get('/replicar/buscar',async(req,res)=>{
@@ -2483,41 +2579,86 @@ app.get('/catalogos/items',async(req,res)=>{
 
     // Filtrar solo items que participan en catálogo (tienen catalog_product_id)
     const enCatalogo=detalles.filter(it=>it.catalog_product_id&&it.catalog_listing!==false);
-    // Para cada item con catalog_product_id, obtener posición en catálogo
+
+    // Para cada item con catalog_product_id, usar price_to_win (endpoint oficial ML)
+    // + /products/$PRODUCT_ID/items para traer competidores reales
     const items=await Promise.all(enCatalogo.map(async it=>{
       const sku=(it.attributes||[]).find(a=>a.id==='SELLER_SKU')?.value_name||'';
       let estado_catalogo='not_classified';
       let precio_ganador=null;
+      let precio_para_ganar=null; // price_to_win: cuánto tengo que bajar para ganar
       let vendedor_ganador=null;
+      let visit_share=null; // 'maximum','medium','minimum'
+      let competidores=[]; // lista de vendedores compitiendo
+      let competidores_empatando=0;
+
       try{
-        // Consultar catálogo para ver posición — usar search de ML filtrado por catalog_product_id
-        const catR=await fetch(`${ML}/sites/MLA/search?catalog_product_id=${it.catalog_product_id}&limit=5`,{headers:h});
-        if(catR.ok){
-          const catD=await catR.json();
-          const results=catD.results||[];
-          if(results.length){
-            const winner=results[0];
-            precio_ganador=winner.price;
-            vendedor_ganador=winner.seller?.nickname||null;
-            const myItem=results.find(r=>r.id===it.id||r.seller?.id==seller_id);
-            if(myItem&&results.indexOf(myItem)===0) estado_catalogo='winning';
-            else if(myItem) estado_catalogo='losing';
-            else if(it.price<=winner.price) estado_catalogo='tied';
-            else estado_catalogo='losing';
+        // ── 1) price_to_win: estado real y precio para ganar ──────────────────
+        const ptw=await fetch(`${ML}/items/${it.id}/price_to_win?siteId=MLA&version=v2`,{headers:h});
+        if(ptw.ok){
+          const ptwD=await ptw.json();
+          const st=ptwD.status||'';
+          // Mapear estado ML → nuestro estado
+          if(st==='winning'||st==='sharing_first_place') estado_catalogo='winning';
+          else if(st==='competing'||st==='listed') estado_catalogo='losing';
+          else estado_catalogo='not_classified';
+
+          visit_share=ptwD.visit_share||null;
+          competidores_empatando=ptwD.competitors_sharing_first_place||0;
+          // precio que necesito para ganar buybox
+          precio_para_ganar=ptwD.price_to_win||null;
+          // precio del ganador actual
+          if(ptwD.winner){
+            precio_ganador=ptwD.winner.price||null;
+            vendedor_ganador=ptwD.winner.item_id||null; // lo completamos abajo
           }
         }
-      }catch(e){/* ignorar errores de posición */}
-      // Margen estimado con precio actual (14% comisión + 4% IIBB + IVA 21%)
-      const p=it.price||0;
-      const comML=0.14, iibb=0.04;
-      const ivaPart=p-(p/1.21);
-      const margen_actual=p>0?Math.round(((p - p*comML - p*iibb - ivaPart)/p)*100):null;
-      // Margen si bajara al precio ganador
-      const pg=precio_ganador||0;
-      const ivaPg=pg-(pg/1.21);
-      const margen_ganador=pg>0?Math.round(((pg - pg*comML - pg*iibb - ivaPg)/pg)*100):null;
+      }catch(e){console.warn('[catalogos] price_to_win error',it.id,e.message);}
+
+      try{
+        // ── 2) /products/$PRODUCT_ID/items: competidores con precios y sellers ─
+        const prodR=await fetch(`${ML}/products/${it.catalog_product_id}/items?limit=10`,{headers:h});
+        if(prodR.ok){
+          const prodD=await prodR.json();
+          const resultsComp=(prodD.results||[]);
+          competidores=resultsComp.map(c=>({
+            item_id:c.id||'',
+            seller_id:c.seller?.id||null,
+            seller:c.seller?.nickname||c.seller?.id||'—',
+            precio:c.price||0,
+            envio_gratis:!!(c.shipping?.free_shipping),
+            es_mio:c.seller?.id==seller_id||c.id===it.id,
+            reputacion:c.seller?.seller_reputation?.level_id||null,
+            ventas:c.sold_quantity||0,
+            url:c.permalink||''
+          }));
+          // Actualizar vendedor_ganador con nickname real
+          if(competidores.length&&!vendedor_ganador){
+            precio_ganador=competidores[0].precio;
+            vendedor_ganador=competidores[0].seller;
+          } else if(competidores.length&&vendedor_ganador){
+            // vendedor_ganador tenía item_id, buscar nickname
+            const ganItem=competidores.find(c=>c.item_id===vendedor_ganador);
+            vendedor_ganador=ganItem?ganItem.seller:vendedor_ganador;
+          }
+        }
+      }catch(e){console.warn('[catalogos] products/items error',it.catalog_product_id,e.message);}
+
+      // ── 3) Cálculo de márgenes (sobre precio de venta, sin costo: referencia) ─
+      // Fórmula NIVIKO: comisión ML 14% + IIBB 4% + IVA implícito 21%
+      const calcMargen=p=>{
+        if(!p||p<=0) return null;
+        const comML=0.14,iibb=0.04;
+        const ivaPart=p-(p/1.21);
+        return Math.round(((p - p*comML - p*iibb - ivaPart)/p)*100);
+      };
+      const margen_actual=calcMargen(it.price);
+      const pg=precio_para_ganar||precio_ganador||0;
+      const margen_si_igualo=calcMargen(pg);
+
       const tieneDescPrecio=it.original_price!=null&&it.original_price>it.price;
       const tieneAporteML=(it.deal_ids||[]).length>0;
+
       return {
         id:it.id,
         titulo:it.title,
@@ -2530,11 +2671,15 @@ app.get('/catalogos/items',async(req,res)=>{
         thumbnail:it.thumbnail,
         sku,
         catalog_product_id:it.catalog_product_id,
-        estado_catalogo,
-        precio_ganador,
+        estado_catalogo,        // 'winning','losing','not_classified'
+        visit_share,            // 'maximum','medium','minimum'
+        precio_ganador,         // precio del ganador actual
+        precio_para_ganar,      // price_to_win: lo que debo cobrar para ganar
         vendedor_ganador,
+        competidores,           // lista [{seller,precio,es_mio,...}]
+        competidores_empatando,
         margen_actual,
-        margen_ganador
+        margen_ganador:margen_si_igualo  // margen si igualo precio ganador
       };
     }));
 
@@ -2543,7 +2688,7 @@ app.get('/catalogos/items',async(req,res)=>{
 });
 
 app.get('/version',(req,res)=>res.json({
-  version:'10.0',
+  version:'12.0',
   iva_formula:'venta - venta/(1+ivaPct)',
   iibb_formula:'ventaSinIva * 0.04',
   anthropic_key: process.env.ANTHROPIC_API_KEY ? '✓ configurada' : '✗ FALTA ANTHROPIC_API_KEY',
