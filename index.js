@@ -1775,12 +1775,13 @@ app.post('/fulljaus/producto', async(req,res)=>{
 
     console.log('[fulljaus] body a enviar:', JSON.stringify(body));
 
-    // Intentar PUT primero (actualizar si ya existe), luego POST (crear)
-    const putR = await fetch(`${FJ_BASE}/products/${encodeURIComponent(b.sku)}`, {
-      method:'PUT', headers:fjHdr(), body:JSON.stringify(body)
+    // Intentar POST primero — Fulljaus maneja upsert por SKU
+    // (el PUT devuelve 503 HTML cuando el producto existe, así que evitamos PUT)
+    const putR = await fetch(`${FJ_BASE}/products`, {
+      method:'POST', headers:fjHdr(), body:JSON.stringify(body)
     });
     const putRaw = await putR.text();
-    console.log('[fulljaus] PUT status:', putR.status, 'body:', putRaw.slice(0,500));
+    console.log('[fulljaus] POST(upsert) status:', putR.status, 'body:', putRaw.slice(0,500));
     if(putR.ok || putR.status===200){
       const putD = JSON.parse(putRaw);
       // Subir imágenes si vinieron
@@ -1797,13 +1798,13 @@ app.post('/fulljaus/producto', async(req,res)=>{
       return res.json({ok:true, action:'updated', sku:b.sku, data:putD, imagenes:imgResults});
     }
 
-    // Si 404 (no existe) → crear con POST
-    if(putR.status===404||putR.status===400){
+    // Fallback — no debería llegar acá con upsert por POST
+    if(putR.status===404||putR.status===400||putR.status===503){
       const postR = await fetch(`${FJ_BASE}/products`, {
         method:'POST', headers:fjHdr(), body:JSON.stringify(body)
       });
       const postRaw = await postR.text();
-      console.log('[fulljaus] POST status:', postR.status, 'body:', postRaw.slice(0,500));
+      console.log('[fulljaus] POST(retry) status:', postR.status, 'body:', postRaw.slice(0,500));
       const d = JSON.parse(postRaw);
       if(!postR.ok) return res.json({ok:false, error:d.message||d.error||`HTTP ${postR.status}`, detail:d});
       // Subir imágenes después de crear
