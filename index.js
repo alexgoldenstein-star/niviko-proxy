@@ -1793,7 +1793,9 @@ app.post('/fulljaus/producto', async(req,res)=>{
         const ir = await fetch(`${FJ_BASE}/products/${encodeURIComponent(b.sku)}/images`,{
           method:'POST', headers:fjHdr(), body:JSON.stringify({url, position:i})
         });
-        imgResults.push({url, ok:ir.ok, status:ir.status});
+        const irTxt = await ir.text();
+        console.log('[fulljaus] img POST status:', ir.status, 'url:', url.slice(0,80), 'resp:', irTxt.slice(0,200));
+        imgResults.push({url, ok:ir.ok, status:ir.status, resp:irTxt.slice(0,200)});
       }
       return res.json({ok:true, action:'updated', sku:b.sku, data:putD, imagenes:imgResults});
     }
