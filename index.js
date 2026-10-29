@@ -1820,7 +1820,7 @@ app.post('/fulljaus/producto', async(req,res)=>{
       return res.json({ok:true, action:'created', sku:b.sku, data:d, imagenes:imgResults});
     }
 
-    const errD = await putR.json().catch(()=>({error:`HTTP ${putR.status}`}));
+    const errD = JSON.parse(putRaw||'{}');
     res.json({ok:false, error:errD.message||errD.error||`HTTP ${putR.status}`, detail:errD});
   }catch(e){res.status(500).json({ok:false, error:e.message});}
 });
