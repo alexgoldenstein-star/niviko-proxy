@@ -2515,6 +2515,93 @@ app.post('/promociones/precio-bulk',async(req,res)=>{
   res.json({ok:true,total:items.length,exitosos:ok,fallidos:items.length-ok,resultados});
 });
 
+// POST /promociones/sku — buscar todas las variantes de un SKU y aplicar descuento a todas
+// Body: { sku, seller_id, discount_percent, dias?, start_date?, finish_date? }
+app.post('/promociones/sku',async(req,res)=>{
+  const token=req.headers['x-ml-token'];
+  if(!token) return res.status(401).json({error:'Token requerido'});
+  const{sku,seller_id,discount_percent,dias=31,start_date,finish_date}=req.body;
+  if(!sku) return res.status(400).json({error:'sku requerido'});
+  if(!discount_percent||discount_percent<5||discount_percent>80)
+    return res.status(400).json({error:'discount_percent debe estar entre 5 y 80'});
+  try{
+    const h=hdr(token);
+    // 1. Obtener seller_id si no viene
+    let sid=seller_id;
+    if(!sid){
+      const meR=await fetch(`${ML}/users/me`,{headers:h});
+      const me=await meR.json();
+      sid=me.id;
+    }
+    // 2. Buscar items del seller que tengan ese SKU en atributo SELLER_SKU
+    const searchR=await fetch(
+      `${ML}/users/${sid}/items/search?seller_sku=${encodeURIComponent(sku)}&status=active&limit=50`,
+      {headers:h}
+    );
+    const searchD=await searchR.json();
+    let itemIds=(searchD.results||[]);
+    // También intentar con scroll si hay muchos
+    if(!itemIds.length){
+      // Fallback: buscar por q=sku en atributos
+      const s2=await fetch(`${ML}/users/${sid}/items/search?q=${encodeURIComponent(sku)}&status=active&limit=50`,{headers:h});
+      const d2=await s2.json();
+      itemIds=d2.results||[];
+    }
+    if(!itemIds.length) return res.json({ok:false,error:'No se encontraron items con ese SKU',sku,seller_id:sid});
+
+    // 3. Obtener precio actual de cada item para calcular deal_price
+    const itemDetails=await Promise.all(itemIds.map(async id=>{
+      try{
+        const r=await fetch(`${ML}/items/${id}?attributes=id,title,price,status,variations`,{headers:h});
+        const d=await r.json();
+        return {item_id:id,title:d.title||id,price:d.price||0,status:d.status};
+      }catch(e){return {item_id:id,price:0,error:e.message};}
+    }));
+
+    // 4. Aplicar descuento a cada item
+    const ahora=start_date?new Date(start_date):new Date();
+    const fin=finish_date?new Date(finish_date):new Date(ahora.getTime()+dias*24*60*60*1000);
+    const fmt=d=>d.toISOString().slice(0,19)+'.000Z';
+    const hPromo={...h,'Content-Type':'application/json'};
+
+    const resultados=await Promise.all(itemDetails.map(async it=>{
+      if(!it.price) return {...it,ok:false,error:'Sin precio'};
+      try{
+        const deal_price=Math.round(it.price*(1-discount_percent/100));
+        const body={
+          deal_price,
+          discount_percent:parseFloat(discount_percent),
+          promotion_type:'PRICE_DISCOUNT',
+          start_date:fmt(ahora),
+          finish_date:fmt(fin)
+        };
+        const r=await fetch(`${ML}/seller-promotions/items/${it.item_id}`,{
+          method:'POST',headers:hPromo,body:JSON.stringify(body)
+        });
+        const d=await r.json();
+        if(r.ok&&!d.error) return {...it,ok:true,deal_price,discount_percent,metodo:'PRICE_DISCOUNT'};
+        // Fallback: PUT price directo
+        const rp=await fetch(`${ML}/items/${it.item_id}`,{
+          method:'PUT',headers:hPromo,
+          body:JSON.stringify({price:deal_price,original_price:it.price})
+        });
+        const dp=await rp.json();
+        if(rp.ok&&!dp.error) return {...it,ok:true,deal_price,discount_percent,metodo:'put_price'};
+        return {...it,ok:false,error:d.message||d.error||dp.message||dp.error||`HTTP ${r.status}`};
+      }catch(e){return {...it,ok:false,error:e.message};}
+    }));
+
+    const exitosos=resultados.filter(r=>r.ok).length;
+    res.json({
+      ok:true,sku,seller_id:sid,
+      total:resultados.length,exitosos,fallidos:resultados.length-exitosos,
+      discount_percent,
+      start_date:fmt(ahora),finish_date:fmt(fin),
+      resultados
+    });
+  }catch(e){res.status(500).json({ok:false,error:e.message});}
+});
+
 // GET /promociones/deals?seller_id= — listar campañas/deals ofrecidas por ML al vendedor
 app.get('/promociones/deals',async(req,res)=>{
   const token=req.headers['x-ml-token'];
