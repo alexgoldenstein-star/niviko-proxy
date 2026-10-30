@@ -2213,7 +2213,8 @@ app.post('/replicar/publicar',async(req,res)=>{
         const allMatches=fullMsg.matchAll(/\[([A-Za-z0-9_,\s]+)\]/g);
         for(const m of allMatches){
           m[1].split(',').map(s=>s.trim()).filter(Boolean).forEach(id=>{
-            if(id&&!attrIds.includes(id)) attrIds.push(id);
+            // Excluir IDs de categorías (MLA seguido de números) y otros no-atributos
+            if(id&&!attrIds.includes(id)&&!/^MLA\d+$/.test(id)&&!/^\d+$/.test(id)) attrIds.push(id);
           });
         }
         console.log('[ML] Atributos faltantes detectados:', attrIds);
