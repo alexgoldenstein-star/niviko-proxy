@@ -2196,28 +2196,41 @@ app.post('/replicar/publicar',async(req,res)=>{
       const isUnauth=r.status===401||r.status===403||causes.some(c=>(c.code||'').toString().includes('UNAUTHORIZED')||(c.message||'').toLowerCase().includes('unauthorized'));
       if(isUnauth) return res.json({ok:false,error:`Token sin permisos de escritura — re-autenticá la cuenta`,causes,status:r.status,unauthorized:true,ml_raw:d});
 
-      // Detectar atributos condicionales requeridos (ej: VALUE_ADDED_TAX)
-      const missingAttrs=causes.filter(c=>c.code==='item.attribute.missing_conditional_required'||(c.message||'').toLowerCase().includes('required for category'));
-      if(missingAttrs.length){
-        // Buscar qué atributos específicos faltan del mensaje
-        // ML dice: "The attributes [VALUE_ADDED_TAX] are required"
+      // Detectar atributos requeridos faltantes (condicionales o normales)
+      const isAttrRequired=causes.some(c=>
+        c.code==='item.attribute.missing_conditional_required'||
+        c.code==='item.attribute.required'||
+        (c.message||'').toLowerCase().includes('required for category')||
+        (c.message||'').toLowerCase().includes('are all required')||
+        (c.message||'').toLowerCase().includes('are required')
+      );
+      if(isAttrRequired){
+        // Extraer IDs de atributos faltantes del mensaje
+        // Patrones ML: "[VALUE_ADDED_TAX]" o "[seller_package_width, seller_package_height] are all required"
         const attrIds=[];
-        missingAttrs.forEach(c=>{
-          const m=(c.message||'').match(/\[([A-Z_,\s]+)\]/);
-          if(m) m[1].split(',').map(s=>s.trim()).forEach(id=>{if(id) attrIds.push(id);});
-        });
-        // Buscar valores posibles consultando ML
-        const attrsInfo=await Promise.all(attrIds.map(async attrId=>{
+        const fullMsg=causes.map(c=>c.message||'').join(' ');
+        // Buscar todos los [ATTR_ID] en todos los mensajes
+        const allMatches=fullMsg.matchAll(/\[([A-Za-z0-9_,\s]+)\]/g);
+        for(const m of allMatches){
+          m[1].split(',').map(s=>s.trim()).filter(Boolean).forEach(id=>{
+            if(id&&!attrIds.includes(id)) attrIds.push(id);
+          });
+        }
+        console.log('[ML] Atributos faltantes detectados:', attrIds);
+        if(attrIds.length){
+          // Buscar valores posibles consultando ML (una sola llamada para todos)
+          let allCatAttrs=[];
           try{
             const ar=await fetch(`${ML}/categories/${categoria}/attributes`,{headers:{'Authorization':`Bearer ${token}`}});
-            if(!ar.ok) return {id:attrId,name:attrId,values:[]};
-            const attrs=await ar.json();
-            const found=attrs.find(a=>a.id===attrId);
+            if(ar.ok) allCatAttrs=await ar.json();
+          }catch(e){}
+          const attrsInfo=attrIds.map(attrId=>{
+            const found=allCatAttrs.find(a=>a.id===attrId);
             if(!found) return {id:attrId,name:attrId,values:[]};
             return {id:attrId,name:found.name||attrId,values:(found.values||[]).map(v=>({id:v.id,name:v.name}))};
-          }catch(e){return {id:attrId,name:attrId,values:[]};}
-        }));
-        return res.json({ok:false,error:`Faltan atributos requeridos para esta categoría`,causes,status:r.status,ml_raw:d,attrs_faltantes:attrsInfo});
+          });
+          return res.json({ok:false,error:`Faltan atributos requeridos para esta categoría`,causes,status:r.status,ml_raw:d,attrs_faltantes:attrsInfo});
+        }
       }
 
       return res.json({ok:false,error:detail,causes,status:r.status,ml_raw:d});
