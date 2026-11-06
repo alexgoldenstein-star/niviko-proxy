@@ -2102,7 +2102,7 @@ function limpiarAtributos(attrs){
   // IDs que ML rechaza al crear un item nuevo desde cero
   // (son del vendedor original, internos de ML, o de catálogo)
   const SKIP_IDS=new Set([
-    'ITEM_CONDITION','EAN',
+    'ITEM_CONDITION',
     'ALPHANUMERIC_MODEL','SELLER_ID','ITEM_ID',
     'CATALOG_PRODUCT_ID','CATALOG_LISTING_TYPE_ID',
     'FAMILY_NAME','family_name',
@@ -2117,11 +2117,15 @@ function limpiarAtributos(attrs){
     // Filtrar valores negativos o placeholder (-1, 0, etc en campos numéricos)
     if(a.value_name&&(a.value_name==='-1'||a.value_name==='0')) return false;
     return true;
-  }).map(a=>({
-    id:a.id,
-    ...(a.value_id?{value_id:a.value_id}:{}),
-    ...(a.value_name?{value_name:a.value_name}:{})
-  }));
+  }).map(a=>{
+    // Para GTIN/EAN: solo dígitos, largo válido (8,12,13,14 dígitos)
+    if(a.id==='GTIN'||a.id==='EAN'){
+      const raw=(a.value_name||a.value_id||'').toString().replace(/\D/g,'');
+      if(![8,12,13,14].includes(raw.length)) return null;
+      return {id:a.id,value_name:raw};
+    }
+    return {id:a.id,...(a.value_id?{value_id:a.value_id}:{}),...(a.value_name?{value_name:a.value_name}:{})};
+  }).filter(Boolean);
 }
 
 // ── REPLICAR: publicar item en UNA cuenta ─────────────────────────────────────
