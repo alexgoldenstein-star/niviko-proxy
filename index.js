@@ -387,7 +387,7 @@ const costo = prod ? prod.ars*(item.quantity||1) : 0; // multiplicar por unidade
   };
 }
 
-app.get('/',(req,res)=>res.json({status:'ok',v:'9.6',prods:PRODS.length,zones:Object.keys(ZONA).length,family_name_retry:true}));
+app.get('/',(req,res)=>res.json({status:'ok',v:'9.7',prods:PRODS.length,zones:Object.keys(ZONA).length,family_name_retry:true,gtin_detection:'improved'}));
 
 app.post('/auth/token',async(req,res)=>{
   try{const b=new URLSearchParams({grant_type:'authorization_code',...req.body});const r=await fetch(AUTH,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()});res.json(await r.json());}
@@ -2200,28 +2200,39 @@ app.post('/replicar/publicar',async(req,res)=>{
       const isUnauth=r.status===401||r.status===403||causes.some(c=>(c.code||'').toString().includes('UNAUTHORIZED')||(c.message||'').toLowerCase().includes('unauthorized'));
       if(isUnauth) return res.json({ok:false,error:`Token sin permisos de escritura — re-autenticá la cuenta`,causes,status:r.status,unauthorized:true,ml_raw:d});
 
-      // Detectar atributos requeridos faltantes (condicionales o normales)
+      // Detectar atributos requeridos faltantes o con formato inválido
       const isAttrRequired=causes.some(c=>
         c.code==='item.attribute.missing_conditional_required'||
         c.code==='item.attribute.required'||
+        c.code==='item.attribute.invalid'||
         (c.message||'').toLowerCase().includes('required for category')||
         (c.message||'').toLowerCase().includes('are all required')||
-        (c.message||'').toLowerCase().includes('are required')
+        (c.message||'').toLowerCase().includes('are required')||
+        (c.message||'').toLowerCase().includes('invalid format')
       );
-      if(isAttrRequired){
-        // Extraer IDs de atributos faltantes del mensaje
-        // Patrones ML: "[VALUE_ADDED_TAX]" o "[seller_package_width, seller_package_height] are all required"
+      // También detectar si el error menciona GTIN/EAN directamente
+      const fullCausesMsg=causes.map(c=>(c.message||'')+' '+(c.code||'')).join(' ');
+      const isGtinError=/\b(GTIN|EAN)\b/i.test(fullCausesMsg);
+      if(isAttrRequired||isGtinError){
+        // Extraer IDs de atributos del mensaje — buscar patrones como [GTIN] o "GTIN"
         const attrIds=[];
         const fullMsg=causes.map(c=>c.message||'').join(' ');
-        // Buscar todos los [ATTR_ID] en todos los mensajes
-        const allMatches=fullMsg.matchAll(/\[([A-Za-z0-9_,\s]+)\]/g);
-        for(const m of allMatches){
+        // Patrón 1: [ATTR_ID] con caracteres alfanuméricos y guión bajo
+        const bracketMatches=fullMsg.matchAll(/\[([A-Za-z][A-Za-z0-9_,\s]*)\]/g);
+        for(const m of bracketMatches){
           m[1].split(',').map(s=>s.trim()).filter(Boolean).forEach(id=>{
-            // Excluir IDs de categorías (MLA seguido de números) y otros no-atributos
-            if(id&&!attrIds.includes(id)&&!/^MLA\d+$/.test(id)&&!/^\d+$/.test(id)) attrIds.push(id);
+            if(id&&!attrIds.includes(id)&&!/^MLA\d+$/i.test(id)&&!/^\d+$/.test(id)) attrIds.push(id);
           });
         }
-        console.log('[ML] Atributos faltantes detectados:', attrIds);
+        // Patrón 2: si GTIN/EAN está en el mensaje pero no fue captado por brackets
+        if(/\bGTIN\b/.test(fullMsg)&&!attrIds.includes('GTIN')) attrIds.push('GTIN');
+        if(/\bEAN\b/.test(fullMsg)&&!attrIds.includes('EAN')&&!attrIds.includes('GTIN')) attrIds.push('GTIN');
+        // Patrón 3: causes con code que menciona el atributo
+        causes.forEach(c=>{
+          const codeAttr=(c.code||'').replace('item.attribute.','').replace('missing_conditional_required','').replace('required','').replace('invalid','').trim().toUpperCase();
+          if(codeAttr&&codeAttr.length>1&&!attrIds.includes(codeAttr)&&!/^MLA\d+$/i.test(codeAttr)) attrIds.push(codeAttr);
+        });
+        console.log('[ML] Atributos faltantes/inválidos detectados:', attrIds, '| causes:', JSON.stringify(causes));
         if(attrIds.length){
           // Buscar valores posibles consultando ML (una sola llamada para todos)
           let allCatAttrs=[];
@@ -2231,10 +2242,14 @@ app.post('/replicar/publicar',async(req,res)=>{
           }catch(e){}
           const attrsInfo=attrIds.map(attrId=>{
             const found=allCatAttrs.find(a=>a.id===attrId);
-            if(!found) return {id:attrId,name:attrId,values:[]};
+            if(!found) return {id:attrId,name:attrId==='GTIN'?'Código universal de producto (GTIN/EAN)':attrId,values:[]};
             return {id:attrId,name:found.name||attrId,values:(found.values||[]).map(v=>({id:v.id,name:v.name}))};
           });
           return res.json({ok:false,error:`Faltan atributos requeridos para esta categoría`,causes,status:r.status,ml_raw:d,attrs_faltantes:attrsInfo});
+        }
+        // isGtinError pero no se extrajo el ID — forzar GTIN
+        if(isGtinError){
+          return res.json({ok:false,error:`El GTIN/EAN es requerido para esta categoría`,causes,status:r.status,ml_raw:d,attrs_faltantes:[{id:'GTIN',name:'Código universal de producto (GTIN/EAN)',values:[]}]});
         }
       }
 
